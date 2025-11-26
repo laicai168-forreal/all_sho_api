@@ -1,0 +1,14 @@
+# Use the same OS Lambda runs on
+FROM public.ecr.aws/lambda/python:3.12
+
+# Set up working directory
+WORKDIR /opt
+
+# Copy your dependency list
+COPY lambda-layer/requirements.txt .
+
+# Install Python dependencies into /opt/python
+RUN pip install -r requirements.txt -t python
+
+# Output layer to be copied by CDK
+CMD ["bash"]
