@@ -14,6 +14,7 @@ import re
 from psycopg2.extras import execute_values, RealDictCursor
 import psycopg2
 import json
+import time
 
 # other website for hotwheels
 # https://164custom.com/hot-wheels-mainline-case-highlights_HW.html
@@ -25,6 +26,8 @@ DDB_TABLE = os.environ.get("TABLE_NAME", "DiecastCarsTable")
 SECRET_ARN = os.environ.get("DB_SECRET_ARN", "SECRET")
 DB_NAME = os.environ.get("DB_NAME", "DB")
 USER_AGENT = os.environ.get("USER_AGENT", "CarCrawler/1.0 Python/requests")
+LOGS_TABLE_NAME = os.environ.get("LOGS_TABLE_NAME", "CrawlerLogsTable")
+
 region = os.environ.get("AWS_REGION", "us-east-1")
 
 REQUEST_DELAY = float(os.environ.get("REQUEST_DELAY", "1.5"))
@@ -34,6 +37,9 @@ s3 = boto3.client("s3")
 dynamodb = boto3.resource("dynamodb")
 secrets_client = boto3.client("secretsmanager")
 table = dynamodb.Table(DDB_TABLE)
+log_table = dynamodb.Table(LOGS_TABLE_NAME)
+
+logs = []
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -59,9 +65,9 @@ def get_db_credentials():
 def upsert_items(conn, items):
     with conn.cursor() as cur:
         sql = """
-        INSERT INTO cars (id, original_id, source_url, title, brand, make, scale, crawled_date, c_ver, images, additional_info)
+        INSERT INTO cars (code, original_id, source_url, title, brand, make, scale, crawled_date, c_ver, images, additional_info)
         VALUES %s
-        ON CONFLICT (id)
+        ON CONFLICT (code)
         DO UPDATE SET
           original_id = EXCLUDED.original_id,
           source_url = EXCLUDED.source_url,
@@ -87,7 +93,7 @@ def upsert_items(conn, items):
 
             values.append(
                 (
-                    it.get("id"),
+                    it.get("code"),
                     it.get("original_id"),
                     it.get("source_url"),
                     it.get("title"),
@@ -117,7 +123,7 @@ def get_db_conn(creds):
     return conn
 
 
-##################################
+################################
 def safe_get(url, timeout=15, stream=False):
     headers = {"User-Agent": USER_AGENT}
     resp = requests.get(url, headers=headers, timeout=timeout, stream=stream)
@@ -235,8 +241,8 @@ def get_existing_urls(conn, urls):
 
 
 
-def crawl_minigt_product_page(url, historical_image_urls, version, s3_bucket=S3_BUCKET):
-    logger.info(f"Crawling product {url}")
+def crawl_minigt_product_page(url, historical_image_urls, version, log, s3_bucket=S3_BUCKET):
+    log(f"Crawling product {url}")
     time.sleep(REQUEST_DELAY)
     resp = safe_get(url)
     html = resp.text
@@ -258,7 +264,7 @@ def crawl_minigt_product_page(url, historical_image_urls, version, s3_bucket=S3_
     for u in image_urls:
         print(f'checking image url {u}')
         if u in historical_image_urls:
-            logger.info(f"Skipping fetching image for {u}, image already exists")
+            log(f"Skipping fetching image for {u}, image already exists")
             continue
         try:
             image_s3_key = download_image_to_s3(u, s3_bucket)
@@ -266,12 +272,12 @@ def crawl_minigt_product_page(url, historical_image_urls, version, s3_bucket=S3_
                 f"https://{s3_bucket}.s3.{region}.amazonaws.com/{image_s3_key}"
             )
             images.append({"s3_url": image_s3_url, "original_url": u})
-            logger.info(f"Downloaded image to s3://{s3_bucket}/{image_s3_key}")
+            log(f"Downloaded image to s3://{s3_bucket}/{image_s3_key}")
         except Exception as e:
-            logger.warning(f"Failed to download image {u}: {e}")
+            log(f"Failed to download image {u}: {e}")
 
     item = {
-        "id": f"MGT_{details["id"]}",
+        "code": f"MGT_{details["id"]}",
         "original_id": details["id"],
         "brand": "minigt",
         "make": details["Marque"],
@@ -290,7 +296,7 @@ def crawl_minigt_product_page(url, historical_image_urls, version, s3_bucket=S3_
     return item
 
 
-def extract_minigt_links_from_catalog(catalog_url, booked_urls, max_pages=100):
+def extract_minigt_links_from_catalog(catalog_url, booked_urls, log, max_pages=100):
     urls = set()
     ## keeping this version that considers pagination, may not need it later.
     # next_url = catalog_url
@@ -318,7 +324,7 @@ def extract_minigt_links_from_catalog(catalog_url, booked_urls, max_pages=100):
     #     else:
     #         next_url = None
 
-    logger.info(f"Fetching catalog page {catalog_url}")
+    log(f"Fetching catalog page {catalog_url}")
     time.sleep(REQUEST_DELAY)
     r = safe_get(catalog_url)
     s = BeautifulSoup(r.text, "html.parser")
@@ -337,8 +343,8 @@ def extract_minigt_links_from_catalog(catalog_url, booked_urls, max_pages=100):
 
 
 # Hot wheels page is consisting multiple items
-def crawl_hotwheels_product_page(url, s3_bucket=S3_BUCKET, ddb_table=table):
-    logger.info(f"Crawling product {url}")
+def crawl_hotwheels_product_page(url, log, s3_bucket=S3_BUCKET, ddb_table=table):
+    log(f"Crawling product {url}")
     time.sleep(REQUEST_DELAY)
     resp = safe_get(url)
     html = resp.text
@@ -368,9 +374,9 @@ def crawl_hotwheels_product_page(url, s3_bucket=S3_BUCKET, ddb_table=table):
                     image_s3_url = (
                         f"https://{s3_bucket}.s3.{region}.amazonaws.com/{image_s3_key}"
                     )
-                    logger.info(f"Downloaded image to s3://{s3_bucket}/{image_s3_key}")
+                    log(f"Downloaded image to s3://{s3_bucket}/{image_s3_key}", logs)
                 except Exception as e:
-                    logger.warning(f"Failed to download image {img_url}: {e}")
+                    log(f"Failed to download image {img_url}: {e}", logs)
 
             item = {
                 "id": id,
@@ -386,14 +392,14 @@ def crawl_hotwheels_product_page(url, s3_bucket=S3_BUCKET, ddb_table=table):
             items.append(item)
 
         else:
-            logger.info("Not enough cells for all information")
+            log.info("Not enough cells for all information", logs)
     return items
 
 
-def extract_hotwheels_links_from_catalog(catalog_url, max_pages=100):
+def extract_hotwheels_links_from_catalog(catalog_url, log, max_pages=100):
     urls = set()
     while catalog_url and len(urls) < max_pages:
-        logger.info(f"Fetching catalog page {catalog_url}")
+        log(f"Fetching catalog page {catalog_url}")
         time.sleep(REQUEST_DELAY)
         r = safe_get(catalog_url)
         s = BeautifulSoup(r.text, "html.parser")
@@ -411,7 +417,7 @@ def extract_hotwheels_links_from_catalog(catalog_url, max_pages=100):
 
 
 # 164 custom Hot wheels page is consisting multiple items
-def crawl_hotwheels_164custom_product_page(url, historical_image_urls, version, s3_bucket=S3_BUCKET):
+def crawl_hotwheels_164custom_product_page(url, historical_image_urls, version, log, s3_bucket=S3_BUCKET):
     logger.info(f"Crawling product {url}")
     time.sleep(REQUEST_DELAY)
     resp = safe_get(url)
@@ -462,7 +468,7 @@ def crawl_hotwheels_164custom_product_page(url, historical_image_urls, version, 
             print(f'checking image url {img_url}')
             print(f'historical_image_urls {historical_image_urls}')
             if img_url in historical_image_urls:
-                logger.info(f"Skipping fetching image of {img_url}")
+                log(f"Skipping fetching image of {img_url}")
                 continue
             if img_url:
                 try:
@@ -471,18 +477,18 @@ def crawl_hotwheels_164custom_product_page(url, historical_image_urls, version, 
                         f"https://{s3_bucket}.s3.{region}.amazonaws.com/{image_s3_key}"
                     )
                     images.append({"s3_url": image_s3_url, "original_url": img_url})
-                    logger.info(f"Downloaded image to s3://{s3_bucket}/{image_s3_key}")
+                    log(f"Downloaded image to s3://{s3_bucket}/{image_s3_key}")
                 except Exception as e:
-                    logger.warning(f"Failed to download image {img_url}: {e}")
+                    log(f"Failed to download image {img_url}: {e}")
             else:
-                logger.warning(f"There is no url for the img of {url}")
+                log(f"There is no url for the img of {url}")
     else:
-        logger.warning(
+        log(
             f"There is no images for hot wheels {url}, check if the dom still exists"
         )
 
     item = {
-        "id": f"HW_{id}",
+        "code": f"HW_{id}",
         "original_id": id,
         "brand": "hotwheels",
         "make": "",
@@ -506,9 +512,9 @@ def crawl_hotwheels_164custom_product_page(url, historical_image_urls, version, 
     return item
 
 
-def extract_hotwheels_164custom_links_from_catalog(catalog_url, max_pages=100):
+def extract_hotwheels_164custom_links_from_catalog(catalog_url, log, max_pages=100):
     urls = set()
-    logger.info(f"Fetching catalog page {catalog_url}")
+    log(f"Fetching catalog page {catalog_url}")
     time.sleep(REQUEST_DELAY)
     r = safe_get(catalog_url)
     s = BeautifulSoup(r.text, "html.parser")
@@ -530,121 +536,170 @@ def extract_hotwheels_164custom_links_from_catalog(catalog_url, max_pages=100):
     return list(urls)
 
 
+
 # Lambda handler
 def handler(event, context):
-    version = event.get("version")
-    brand = event.get("brand")
-    default_limit = 0
-    max_pages = event.get("max_pages", default_limit)
-    known_brands = ['minigt', 'hotwheels']
-    if not version or version == 0:
-        return {
-                "statusCode": 500,
-                "body": json.dumps({"error": 'no version is specified, version should not be 0, you need to in put a version'}),
+    # Detect if this is an API Gateway request
+    if "body" in event and isinstance(event["body"], str):
+        body = json.loads(event["body"])
+    else:
+        body = event
+
+    job_id = body.get("job_id")
+    ONE_MONTH = 30 * 24 * 60 * 60
+
+    def log(msg):
+        ts = int(time.time() * 1000)
+        print(f"[JOB {job_id}] {msg}")
+        log_table.put_item(
+        Item={
+                "jobId": job_id,
+                "ts": ts,
+                "message": msg,
+                "expireAt": int(time.time()) + ONE_MONTH,
             }
-    if not brand:
+        )
+        
+
+    log('Start crawling')
+
+    try: 
+        version = body.get("version")
+        brand = body.get("brand")
+        default_limit = 0
+        max_pages = body.get("max_pages", default_limit)
+        known_brands = ['minigt', 'hotwheels']
+        if not version or version == 0:
+            return {
+                    "statusCode": 500,
+                    "body": json.dumps({"error": 'no version is specified, version should not be 0, you need to in put a version'}),
+                }
+        if not brand:
+            return {
+                    "statusCode": 500,
+                    "body": json.dumps({"error": 'no brand specified, you need to input a brand name'}),
+                }
+        
+        if brand not in known_brands:
+            return {
+                    "statusCode": 500,
+                    "body": json.dumps({"error": f'brand name you give does not exist, use those ones {', '.join(known_brands)}'}),
+                }
+        
+        if not max_pages:
+            log(f'no limit is given, setting it to default {default_limit}')
+        
+        creds = get_db_credentials()
+        conn = get_db_conn(creds)
+        urls = body.get("product_urls", [])
+        # lower_version_rows = get_lower_ver_rows(conn, version, brand, max_pages)
+        # print(f'lower_versoin_rows {lower_version_rows}')
+        # urls.extend([row.get("source_url") for row in lower_version_rows if row.get("source_url")])
+        # # get this list of downloaded images urls, so we will skip the dup download operations to these images
+        # historical_image_urls = [
+        #     img["original_url"]
+        #     for row in lower_version_rows
+        #     if row.get("images")
+        #     for img in row["images"]
+        #     if img.get("original_url")
+        # ]
+        # print(f'historical images: {historical_image_urls}')
+        
+        if "catalog_url" in body and "brand" in body and len(urls) < max_pages:
+            try:
+                if body.get("brand") == "minigt":
+                    urls.extend(extract_minigt_links_from_catalog(
+                        body["catalog_url"], urls, log, max_pages=max_pages
+                    ))
+                # if body.get("brand") == "hotwheels":
+                #     urls = extract_hotwheels_links_from_catalog(
+                #         body["catalog_url"], max_pages=max_pages
+                #     )
+                if body.get("brand") == "hotwheels":
+                    urls.extend(extract_hotwheels_164custom_links_from_catalog(
+                        body["catalog_url"], log, max_pages=max_pages,
+                    ))
+            except Exception as e:
+                log(f"Failed to extract from catalog: {e}")
+                return {"error": str(e)}
+        
+        historical_rows = get_existing_urls(conn, urls)
+
+        historical_image_urls = [
+            img["original_url"]
+            for row in historical_rows
+            if row.get("images")
+            for img in row["images"]
+            if img.get("original_url")
+        ]
+
+        historical_urls = [
+            row["source_url"]
+            for row in historical_rows
+            if row.get("source_url")
+        ]
+
+        print(f'history url {historical_urls}, current url {urls}')
+
+        urls = [
+            u for u in urls if u not in historical_urls
+        ]
+
+        items_to_insert = []
+        results = []
+        
+        for u in urls:
+            try:
+                if brand == "minigt":
+                    item = crawl_minigt_product_page(u, historical_image_urls, version, log)
+                    items_to_insert.append(item)
+
+                # elif brand == "hotwheels":
+                #     items = crawl_hotwheels_product_page(u)
+                #     items_to_insert.extend(items)
+
+                elif brand == "hotwheels":
+                    item = crawl_hotwheels_164custom_product_page(u, historical_image_urls, version, log)
+                    items_to_insert.append(item)
+                    # return {"count": len(items_to_insert), "results": items_to_insert}
+                else:
+                    log("no brand specified")
+                
+                print(f"""
+                    {len(body.get("product_urls", []))} given urls.
+                    {len(urls)} new urls
+                """)
+
+            except Exception as e:
+                log(f"Failed crawling {u}: {e}")
+                results.append({"url": u, "error": str(e)})
+        if len(items_to_insert) > 0:
+            upsert_items(conn, items_to_insert)
+
+        conn.close()
+        log('DONE')
+
         return {
-                "statusCode": 500,
-                "body": json.dumps({"error": 'no brand specified, you need to input a brand name'}),
-            }
-    
-    if brand not in known_brands:
+            "statusCode": 200,
+            "body": json.dumps({
+                "message": "crawl completed",
+                "brand": brand,
+                "version": version,
+                "total_urls_received": len(body.get("product_urls", [])),
+                "new_urls_crawled": len(urls),
+                "inserted_items_length": len(items_to_insert),
+                "inserted_items": items_to_insert,
+                "errors": results,
+                "logs": logs
+            })
+        }
+
+    except Exception as e:
+        log(f"Failed to crawl: {e}")
         return {
-                "statusCode": 500,
-                "body": json.dumps({"error": f'brand name you give does not exist, use those ones {', '.join(known_brands)}'}),
-            }
-    
-    if not max_pages:
-        logger.info(f'no limit is given, setting it to default {default_limit}')
-    
-    creds = get_db_credentials()
-    conn = get_db_conn(creds)
-    urls = event.get("product_urls", [])
-    # lower_version_rows = get_lower_ver_rows(conn, version, brand, max_pages)
-    # print(f'lower_versoin_rows {lower_version_rows}')
-    # urls.extend([row.get("source_url") for row in lower_version_rows if row.get("source_url")])
-    # # get this list of downloaded images urls, so we will skip the dup download operations to these images
-    # historical_image_urls = [
-    #     img["original_url"]
-    #     for row in lower_version_rows
-    #     if row.get("images")
-    #     for img in row["images"]
-    #     if img.get("original_url")
-    # ]
-    # print(f'historical images: {historical_image_urls}')
-    
-    if "catalog_url" in event and "brand" in event and len(urls) < max_pages:
-        try:
-            if event.get("brand") == "minigt":
-                urls.extend(extract_minigt_links_from_catalog(
-                    event["catalog_url"], urls, max_pages=max_pages
-                ))
-            # if event.get("brand") == "hotwheels":
-            #     urls = extract_hotwheels_links_from_catalog(
-            #         event["catalog_url"], max_pages=max_pages
-            #     )
-            if event.get("brand") == "hotwheels":
-                urls.extend(extract_hotwheels_164custom_links_from_catalog(
-                    event["catalog_url"], max_pages=max_pages
-                ))
-        except Exception as e:
-            logger.exception(f"Failed to extract from catalog: {e}")
-            return {"error": str(e)}
-    
-    historical_rows = get_existing_urls(conn, urls)
-
-    historical_image_urls = [
-        img["original_url"]
-        for row in historical_rows
-        if row.get("images")
-        for img in row["images"]
-        if img.get("original_url")
-    ]
-
-    historical_urls = [
-        row["source_url"]
-        for row in historical_rows
-        if row.get("source_url")
-    ]
-
-    print(f'history url {historical_urls}, current url {urls}')
-
-    urls = [
-        u for u in urls if u not in historical_urls
-    ]
-
-    items_to_insert = []
-    results = []
-    
-    for u in urls:
-        try:
-            if brand == "minigt":
-                item = crawl_minigt_product_page(u, historical_image_urls, version)
-                items_to_insert.append(item)
-
-            # elif brand == "hotwheels":
-            #     items = crawl_hotwheels_product_page(u)
-            #     items_to_insert.extend(items)
-
-            elif brand == "hotwheels":
-                item = crawl_hotwheels_164custom_product_page(u, historical_image_urls, version)
-                items_to_insert.append(item)
-                # return {"count": len(items_to_insert), "results": items_to_insert}
-            else:
-                logger.exception("no brand specified")
-            
-            print(f"""
-                {len(event.get("product_urls", []))} given urls.
-                {len(urls)} new urls
-            """)
-
-        except Exception as e:
-            logger.exception(f"Failed crawling {u}: {e}")
-            results.append({"url": u, "error": str(e)})
-    if len(items_to_insert) > 0:
-        upsert_items(conn, items_to_insert)
-
-    conn.close()
+            "statusCode": 500,
+            "body": json.dumps({"error": str(e)})
+        }
 
 
 # If run locally

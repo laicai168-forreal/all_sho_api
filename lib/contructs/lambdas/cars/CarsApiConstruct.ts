@@ -1,26 +1,37 @@
-import * as cdk from 'aws-cdk-lib';
+import * as ec2 from 'aws-cdk-lib/aws-ec2';
 import { Construct } from 'constructs';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as apigateway from 'aws-cdk-lib/aws-apigateway';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as path from 'path';
-import { ISecret } from 'aws-cdk-lib/aws-secretsmanager';
 import { IVpc } from 'aws-cdk-lib/aws-ec2';
+import { DatabaseInstance } from 'aws-cdk-lib/aws-rds';
+import { Duration } from 'aws-cdk-lib';
+import { ISecret } from 'aws-cdk-lib/aws-secretsmanager';
 
 interface CarApiProps {
-    dynamoTable: dynamodb.ITable;
     userCollectionTable: dynamodb.ITable;
+    likeCollectionTable: dynamodb.ITable;
     secret: ISecret;
     vpc: IVpc;
+    rds: DatabaseInstance;
 }
 
 export class CarApi extends Construct {
     public readonly api: apigateway.RestApi;
+    public readonly function: lambda.Function;
 
-    constructor(scope: Construct, id: string, props: CarApiProps) {
+    constructor(
+        scope: Construct,
+        id: string,
+        {
+            userCollectionTable,
+            likeCollectionTable,
+            secret,
+            vpc,
+            rds
+        }: CarApiProps) {
         super(scope, id);
-
-        const { dynamoTable, secret, userCollectionTable, vpc } = props;
 
         const crawlerDeps = new lambda.LayerVersion(this, 'CrawlerDepsLayer', {
             code: lambda.Code.fromAsset(path.join(__dirname, '../../../../lambda-layer/lambda_layer.zip')),
@@ -28,23 +39,27 @@ export class CarApi extends Construct {
             description: 'Crawler dependencies layer',
         });
 
-        const apiLambda = new lambda.Function(this, 'CarApiHandler', {
+        this.function = new lambda.Function(this, 'CarApiHandler', {
             runtime: lambda.Runtime.PYTHON_3_12,
             handler: 'car.handler',
             code: lambda.Code.fromAsset(path.join(__dirname, '../../../../lambda/api/cars')),
             environment: {
-                CAR_TABLE_NAME: dynamoTable.tableName,
                 USER_COLLECTION_TABLE_NAME: userCollectionTable.tableName,
+                LIKE_COLLECTION_TABLE_NAME: likeCollectionTable.tableName,
                 DB_SECRET_ARN: secret.secretArn,
                 DB_NAME: 'carsdb',
             },
             layers: [crawlerDeps],
-            vpc
+            vpc,
+            vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
+            allowPublicSubnet: false,
+            timeout: Duration.seconds(15),
         });
 
-        dynamoTable.grantReadData(apiLambda);
-        secret.grantRead(apiLambda);
-        userCollectionTable.grantReadData(apiLambda);
+        userCollectionTable.grantReadData(this.function);
+        likeCollectionTable.grantReadData(this.function);
+        rds.connections.allowDefaultPortFrom(this.function);
+        secret.grantRead(this.function);
 
         this.api = new apigateway.RestApi(this, 'CarApi', {
             restApiName: 'Car Data Service',
@@ -56,6 +71,6 @@ export class CarApi extends Construct {
         });
 
         const cars = this.api.root.addResource('cars');
-        cars.addMethod('GET', new apigateway.LambdaIntegration(apiLambda));
+        cars.addMethod('GET', new apigateway.LambdaIntegration(this.function));
     }
 }

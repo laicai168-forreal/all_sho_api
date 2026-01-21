@@ -11,3 +11,8 @@ lambda-layer/python
 
 *.zip
 lambda-layer/*.zip
+/lib/generated/prisma
+
+/lib/generated/prisma
+
+.env

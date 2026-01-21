@@ -47,7 +47,7 @@ def handler(event, context):
 
         with conn.cursor() as cur:
             sql = """
-            DELETE FROM user_collection_storage
+            DELETE FROM user_liked_items
             WHERE user_id = %s
               AND car_id = %s
             RETURNING user_id, car_id;
@@ -67,7 +67,7 @@ def handler(event, context):
             },
             "body": json.dumps(
                 {
-                    "message": "Item removed from inventory successfully",
+                    "message": "Item removed from likes successfully",
                     "deleted": row is not None,
                     "userId": user_id,
                     "carId": car_id,

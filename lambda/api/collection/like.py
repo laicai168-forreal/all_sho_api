@@ -1,5 +1,6 @@
 import json
 import os
+import time
 import boto3
 import psycopg2
 
@@ -24,15 +25,22 @@ def get_db_connection():
 
 
 def handler(event, context):
-    try:
-        params = event.get("queryStringParameters") or {}
 
-        car_id = params.get("carId")
+    try:
+        if "body" in event and isinstance(event["body"], str):
+            body = json.loads(event["body"])
+        else:
+            body = event
+
+        car_id = body.get("carId")
         if not car_id:
             return {
                 "statusCode": 400,
                 "body": json.dumps({"error": "carId is required"}),
             }
+
+        # keep this for auth debug
+        # print("AUTHORIZE CONTEXT:", event.get("requestContext", {}).get("authorizer"))
 
         claims = event["requestContext"]["authorizer"]["jwt"]["claims"]
         user_id = claims["sub"]
@@ -47,9 +55,9 @@ def handler(event, context):
 
         with conn.cursor() as cur:
             sql = """
-            DELETE FROM user_collection_storage
-            WHERE user_id = %s
-              AND car_id = %s
+            INSERT INTO user_liked_items (user_id, car_id)
+            VALUES (%s, %s)
+            ON CONFLICT DO NOTHING
             RETURNING user_id, car_id;
             """
             cur.execute(sql, (user_id, car_id))
@@ -67,10 +75,10 @@ def handler(event, context):
             },
             "body": json.dumps(
                 {
-                    "message": "Item removed from inventory successfully",
-                    "deleted": row is not None,
+                    "message": "Added to likes",
                     "userId": user_id,
                     "carId": car_id,
+                    "added": row is not None,
                 }
             ),
         }

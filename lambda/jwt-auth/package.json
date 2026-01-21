@@ -1,0 +1,16 @@
+{
+    "name": "jwt-auth-lambda",
+    "version": "1.0.0",
+    "description": "JWT authorizer Lambda for Cognito",
+    "main": "handler.ts",
+    "scripts": {
+        "build": "tsc -p tsconfig.lambda.json"
+    },
+    "dependencies": {
+        "aws-jwt-verify": "^5.1.0"
+    },
+    "devDependencies": {
+        "typescript": "^5.6.3",
+        "@types/aws-lambda": "^8.10.159"
+    }
+}

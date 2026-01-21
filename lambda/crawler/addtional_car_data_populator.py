@@ -6,17 +6,19 @@ from psycopg2.extras import execute_values
 import psycopg2
 import json
 from datetime import date
+import time
 
 # CONFIG via env vars
 SECRET_ARN = os.environ.get("DB_SECRET_ARN", "SECRET")
 DB_NAME = os.environ.get("DB_NAME", "DB")
+LOGS_TABLE_NAME = os.environ.get("LOGS_TABLE_NAME", "CrawlerLogsTable")
+
 
 # AWS clients
 secrets_client = boto3.client("secretsmanager")
+dynamodb = boto3.resource("dynamodb")
 
-logger = logging.getLogger()
-logger.setLevel(logging.INFO)
-
+log_table = dynamodb.Table(LOGS_TABLE_NAME)
 
 def get_db_credentials():
     resp = secrets_client.get_secret_value(SecretId=SECRET_ARN)
@@ -78,10 +80,10 @@ def get_db_conn(creds):
     return conn
 
 
-def get_cars_to_update(conn, new_a_ver, limit):
+def get_cars_to_update(conn, new_a_ver, limit, log):
     items = []
     data_query = f"""
-        SELECT id, title
+        SELECT id, title, brand
         FROM cars
         WHERE a_ver IS NULL OR a_ver < %s
     """
@@ -92,6 +94,12 @@ def get_cars_to_update(conn, new_a_ver, limit):
     with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
         cur.execute(data_query, (new_a_ver,))
         items = cur.fetchall()
+        items = [
+            {**t, 'title': f'{t['brand']}, {t['title']}'}
+            for t in items
+        ]
+
+    log(f'Updated {', '.join([i['id'] for i in items])}')
     return items
 
 
@@ -100,7 +108,7 @@ DEEPSEEK_API_KEY = "sk-3f588e99303e428b995c7632d2f30349"
 DEEPSEEK_URL = "https://api.deepseek.com/v1/chat/completions"
 
 
-def fetch_deepseek_car_metadata(items):
+def fetch_deepseek_car_metadata(items, log):
     prompt = f"""
     You are an expert diecast model researcher.  
     Given the following array of diecast model names:
@@ -143,8 +151,13 @@ def fetch_deepseek_car_metadata(items):
         "temperature": 0.2,
     }
 
-    res = requests.post(DEEPSEEK_URL, headers=headers, json=body)
-    res.raise_for_status()
+    try:
+        res = requests.post(DEEPSEEK_URL, headers=headers, json=body)
+        res.raise_for_status()
+    except Exception as e:
+        log(f'Failed to communicate with AI agent. Error message: {e}')
+        log(f"END")
+
 
     # The model's response with JSON
     content = res.json()["choices"][0]["message"]["content"].strip()
@@ -154,19 +167,60 @@ def fetch_deepseek_car_metadata(items):
 
 # Lambda handler
 def handler(event, context):
-    a_version = event.get("a_version", 0)
-    limit = event.get("limit")
+    if "body" in event and isinstance(event["body"], str):
+        body = json.loads(event["body"])
+    else:
+        body = event
 
-    creds = get_db_credentials()
-    conn = get_db_conn(creds)
+    job_id = body.get("job_id")
+    ONE_MONTH = 30 * 24 * 60 * 60
 
-    items_to_update = get_cars_to_update(conn, a_version, limit)
-    items_to_insert = fetch_deepseek_car_metadata(items_to_update)
+    def log(msg):
+        ts = int(time.time() * 1000)
+        print(f"[JOB {job_id}] {msg}")
+        log_table.put_item(
+        Item={
+                "jobId": job_id,
+                "ts": ts,
+                "message": msg,
+                "expireAt": int(time.time()) + ONE_MONTH,
+            }
+        )
 
-    if len(items_to_insert) > 0:
-        update_ai_metadata_only(conn, items_to_insert, a_version)
+    log("Start populating car additional data...")
 
-    conn.close()
+    try:
+        a_version = body.get("a_version", 0)
+        limit = body.get("limit")
+
+        creds = get_db_credentials()
+        conn = get_db_conn(creds)
+
+        items_to_update = get_cars_to_update(conn, a_version, limit, log)
+        items_to_insert = fetch_deepseek_car_metadata(items_to_update, log)
+        log(f"Getting new data from AI: {items_to_insert}")
+
+        if len(items_to_insert) > 0:
+            update_ai_metadata_only(conn, items_to_insert, a_version)
+
+        conn.close()
+
+        log("DONE")
+
+        return {
+                "statusCode": 200,
+                "body": json.dumps({
+                    "updated_items": [t['id'] for t in items_to_insert]
+                })
+            }
+
+    except Exception as e:
+        log(f"Failed to crawl: {e}")
+        log(f"END")
+        return {
+            "statusCode": 500,
+            "body": json.dumps({"error": str(e)})
+        }
 
 
 # If run locally

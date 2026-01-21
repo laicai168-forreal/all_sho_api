@@ -2,7 +2,7 @@ import { Construct } from 'constructs';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import { RemovalPolicy } from 'aws-cdk-lib';
 
-export class CrawlerDatabaseConstruct extends Construct {
+export class CarsDynamoConstruct extends Construct {
     public readonly table: dynamodb.Table;
 
     constructor(scope: Construct, id: string) {
