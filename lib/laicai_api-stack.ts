@@ -13,11 +13,7 @@ import { ImagesResizingLambdaConstruct } from './contructs/lambdas/images/Images
 import { ImageResizeCfnConstruct } from './contructs/cloudFront/ImageResizeCfnConstruct';
 import { ImageResizeApiConstruct } from './contructs/apis/ImageResizeApiConstruct';
 import { CarsRDSInstanceConstruct } from './contructs/rds/CarsRDSInstanceConstruct';
-// import { UserCollectionApiConstruct } from './contructs/apis/UserCollectionApiConstruct';
-import { JWTAuthConstruct } from './contructs/lambdas/auth/JWTAuthConstruct';
-import { AuthApiConstruct } from './contructs/apis/AuthApiConstruct';
 import { CarsDataVpcConstruct } from './contructs/vpc/CarsDataVpcConstruct';
-import { JWTAuthorizerConstruct } from './contructs/apis/JWTAuthorizerConstruct';
 import { CrawlerHelperApiConstruct } from './contructs/apis/CrawlerApiConstruct';
 import { CrawlerLoggingConstruct } from './contructs/apis/CrawlerLoggingConstruct';
 import { AdditionalDataHelperApiConstruct } from './contructs/apis/AdditionalDataHelperApiConstruct';
@@ -29,14 +25,6 @@ import { HttpApiConstruct } from './contructs/apis/HttpApiConstruct';
 export class LaicaiApiStack extends cdk.Stack {
 	constructor(scope: Construct, id: string, props?: cdk.StackProps) {
 		super(scope, id, props);
-
-
-
-		// ///////////////////////////////////////////////////////////////
-		// // Authorizer
-		// const { api: authApi } = new AuthApiConstruct(this, 'AuthApi');
-		// const { function: jwtAuthLayeredFn } = new JWTAuthConstruct(this, 'JWTAuthLayeredFn', { authApiGateway: authApi, region: this.region, account: this.account });
-		// const { authorizer } = new JWTAuthorizerConstruct(this, 'JWTAuthorizer', { jwtAuthLayeredFn });
 
 		///////////////////////////////////////////////////////////////
 		// Higher level
