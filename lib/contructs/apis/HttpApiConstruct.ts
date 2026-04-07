@@ -9,6 +9,7 @@ interface HttpApiConstructProps {
     deleteCollectionFn: LambdaFunction;
     likeCollectionFn: LambdaFunction;
     dislikeCollectionFn: LambdaFunction;
+    getCollectionFn: LambdaFunction;
     userPoolId: string;
     appClientId: string;
 }
@@ -24,6 +25,7 @@ export class HttpApiConstruct extends Construct {
             deleteCollectionFn,
             likeCollectionFn,
             dislikeCollectionFn,
+            getCollectionFn,
             userPoolId,
             appClientId,
         } = props;
@@ -56,6 +58,7 @@ export class HttpApiConstruct extends Construct {
             deleteCollectionFn,
             likeCollectionFn,
             dislikeCollectionFn,
+            getCollectionFn,
         });
     }
 }

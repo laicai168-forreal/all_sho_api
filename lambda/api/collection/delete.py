@@ -6,28 +6,38 @@ import psycopg2
 secrets_client = boto3.client("secretsmanager")
 SECRET_ARN = os.environ.get("SECRET_ARN", "SECRET")
 DB_NAME = os.environ.get("DB_NAME", "DB")
+DB_SECRET = None
+DB_CONN = None
 
 
 def get_db_connection():
-    resp = secrets_client.get_secret_value(SecretId=SECRET_ARN)
-    secret = json.loads(resp["SecretString"])
+    global DB_SECRET, DB_CONN
 
-    conn = psycopg2.connect(
-        dbname=DB_NAME,
-        user=secret.get("username"),
-        password=secret.get("password"),
-        host=secret.get("host"),
-        port=int(secret.get("port", 5432)),
-    )
+    # Cache secret
+    if DB_SECRET is None:
+        resp = secrets_client.get_secret_value(SecretId=SECRET_ARN)
+        DB_SECRET = json.loads(resp["SecretString"])
 
-    return conn
+    # Cache connection
+    if DB_CONN is None or DB_CONN.closed:
+        DB_CONN = psycopg2.connect(
+            dbname=DB_NAME,
+            user=DB_SECRET["username"],
+            password=DB_SECRET["password"],
+            host=DB_SECRET["host"],
+            port=int(DB_SECRET.get("port", 5432)),
+        )
+
+    return DB_CONN
 
 
 def handler(event, context):
     try:
         params = event.get("queryStringParameters") or {}
 
+        item_id = params.get("itemId")
         car_id = params.get("carId")
+        delete_all = params.get("deleteAll") == "true"
         if not car_id:
             return {
                 "statusCode": 400,
@@ -56,6 +66,27 @@ def handler(event, context):
             row = cur.fetchone()
             conn.commit()
 
+        with conn.cursor() as cur:
+
+            if item_id:
+                sql = """
+                DELETE FROM user_collection_items
+                WHERE id = %s AND user_id = %s
+                RETURNING id;
+                """
+                cur.execute(sql, (item_id, user_id))
+
+            elif delete_all and car_id:
+                sql = """
+                DELETE FROM user_collection_items
+                WHERE car_id = %s AND user_id = %s
+                RETURNING id;
+                """
+                cur.execute(sql, (car_id, user_id))
+
+            rows = cur.fetchall()
+            conn.commit()
+
         conn.close()
 
         return {
@@ -71,6 +102,7 @@ def handler(event, context):
                     "deleted": row is not None,
                     "userId": user_id,
                     "carId": car_id,
+                    "deletedCount": len(rows),
                 }
             ),
         }

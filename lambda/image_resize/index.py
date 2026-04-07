@@ -68,17 +68,30 @@ def lambda_handler(event, context):
 
         # Save to buffer
         buffer = io.BytesIO()
-        if img.format == "PNG":
+        # if img.format == "PNG":
+        #     img.save(buffer, format="PNG", compress_level=9)
+        # else:
+        #     img.save(buffer, format="JPEG", quality=80)
+
+        # encoded_image = base64.b64encode(buffer.getvalue()).decode("utf-8")
+
+        if content_type == "image/png":
             img.save(buffer, format="PNG", compress_level=9)
+            output_content_type = "image/png"
         else:
+            # JPEG does not support alpha channel
+            if img.mode in ("RGBA", "LA"):
+                img = img.convert("RGB")
+
             img.save(buffer, format="JPEG", quality=80)
+            output_content_type = "image/jpeg"
 
         encoded_image = base64.b64encode(buffer.getvalue()).decode("utf-8")
 
         return {
             "statusCode": 200,
             "headers": {
-                "Content-Type": content_type,
+                "Content-Type": output_content_type,
                 "Cache-Control": "max-age=31536000",
             },
             "body": encoded_image,

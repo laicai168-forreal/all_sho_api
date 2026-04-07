@@ -1,28 +1,75 @@
 import json
 import os
-import time
 import boto3
 import psycopg2
-import uuid
+import traceback
 
 secrets_client = boto3.client("secretsmanager")
 SECRET_ARN = os.environ.get("SECRET_ARN", "SECRET")
 DB_NAME = os.environ.get("DB_NAME", "DB")
+DB_SECRET = None
+DB_CONN = None
 
 
 def get_db_connection():
-    resp = secrets_client.get_secret_value(SecretId=SECRET_ARN)
-    secret = json.loads(resp["SecretString"])
+    global DB_SECRET, DB_CONN
 
-    conn = psycopg2.connect(
-        dbname=DB_NAME,
-        user=secret.get("username"),
-        password=secret.get("password"),
-        host=secret.get("host"),
-        port=int(secret.get("port", 5432)),
-    )
+    # Cache secret
+    if DB_SECRET is None:
+        resp = secrets_client.get_secret_value(SecretId=SECRET_ARN)
+        DB_SECRET = json.loads(resp["SecretString"])
 
-    return conn
+    # Cache connection
+    if DB_CONN is None or DB_CONN.closed:
+        DB_CONN = psycopg2.connect(
+            dbname=DB_NAME,
+            user=DB_SECRET["username"],
+            password=DB_SECRET["password"],
+            host=DB_SECRET["host"],
+            port=int(DB_SECRET.get("port", 5432)),
+        )
+
+    return DB_CONN
+
+
+def success_response(data=None, message="Success"):
+    return {
+        "statusCode": 200,
+        "headers": {
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Headers": "Authorization,Content-Type",
+            "Access-Control-Allow-Methods": "GET,POST,PUT,DELETE",
+        },
+        "body": json.dumps({"message": message, "data": data}),
+    }
+
+
+def error_response(message="Error", status_code=400):
+    return {
+        "statusCode": status_code,
+        "headers": {
+            "Access-Control-Allow-Origin": "*",
+        },
+        "body": json.dumps({"error": message}),
+    }
+
+def resolve_storage_location(cur, item, user_id):
+    storage_location = item.get("storageLocation") or {}
+
+    storage_location_id = storage_location.get("id")
+    storage_location_name = storage_location.get("name")
+
+    if not storage_location_id and storage_location_name:
+        cur.execute("""
+            INSERT INTO storage_locations (user_id, name)
+            VALUES (%s, %s)
+            ON CONFLICT (user_id, LOWER(name))
+            DO UPDATE SET name = EXCLUDED.name
+            RETURNING id;
+        """, (user_id, storage_location_name))
+
+        storage_location_id = cur.fetchone()[0]
+    return storage_location_id
 
 
 def handler(event, context):
@@ -32,17 +79,12 @@ def handler(event, context):
         else:
             body = event
 
-        car_id_base = body.get("carId")
-        if not car_id_base:
-            return {
-                "statusCode": 400,
-                "body": json.dumps({"error": "carId is required"}),
-            }
+        items = body.get("items", [])
+        created_ids = []
+        updated_ids = []
 
-        car_id = str(uuid.UUID(car_id_base))
-
-        # keep this for auth debug
-        # print("AUTHORIZE CONTEXT:", event.get("requestContext", {}).get("authorizer"))
+        if not items:
+            return error_response("items array required")
 
         claims = event["requestContext"]["authorizer"]["jwt"]["claims"]
         user_id = claims["sub"]
@@ -54,36 +96,101 @@ def handler(event, context):
             }
 
         conn = get_db_connection()
+        conn.autocommit = False
 
-        with conn.cursor() as cur:
-            sql = """
-            INSERT INTO user_collection_storage (user_id, car_id)
-            VALUES (%s, %s)
-            ON CONFLICT DO NOTHING
-            RETURNING user_id, car_id;
-            """
-            cur.execute(sql, (user_id, car_id))
-            row = cur.fetchone()
-            conn.commit()
+        try:
+            with conn.cursor() as cur:
+                for item in items:
+                    item_id = item.get("itemId")
 
-        conn.close()
+                    if not item_id:
+                        storage_location_id = resolve_storage_location(
+                            cur, item, user_id
+                        )
 
-        return {
-            "statusCode": 200,
-            "headers": {
-                "Access-Control-Allow-Origin": "*",
-                "Access-Control-Allow-Headers": "Authorization,Content-Type",
-                "Access-Control-Allow-Methods": "GET,POST,DELETE",
-            },
-            "body": json.dumps(
-                {
-                    "message": "Added to collection",
-                    "userId": user_id,
-                    "carId": car_id,
-                    "added": row is not None,
-                }
-            ),
-        }
+                        sql = """
+                        INSERT INTO user_collection_items
+                        (user_id, car_id, condition, purchase_price, purchased_at,
+                        photos, attributes, count, notes, is_published, storage_location_id)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        RETURNING id, car_id;
+                        """
+
+                        cur.execute(sql, (
+                            user_id,
+                            item.get("carId"),
+                            item.get("condition", "UNKNOWN"),
+                            item.get("purchasePrice"),
+                            item.get("purchasedAt"),
+                            json.dumps(item.get("photos", [])),
+                            json.dumps(item.get("attributes", {})),
+                            item.get("count", 1),
+                            item.get("notes"),
+                            item.get("isPublished", False),
+                            storage_location_id
+                        ))
+
+                        created = cur.fetchone()
+
+                        created_ids.append(
+                            {"id": created[0], "carId": created[1]}
+                        )
+
+                    else:
+                        storage_location_id = resolve_storage_location(
+                            cur, item, user_id
+                        )
+
+                        sql = """
+                        UPDATE user_collection_items
+                        SET
+                            condition = %s,
+                            purchase_price = %s,
+                            purchased_at = %s,
+                            photos = %s,
+                            attributes = %s,
+                            count = %s,
+                            notes = %s,
+                            is_published = %s,
+                            storage_location_id = %s,
+                            updated_at = now()
+                        WHERE id = %s
+                        AND user_id = %s
+                        RETURNING id, car_id;
+                        """
+
+                        cur.execute(sql, (
+                            item.get("condition"),
+                            item.get("purchasePrice"),
+                            item.get("purchasedAt"),
+                            json.dumps(item.get("photos", [])),
+                            json.dumps(item.get("attributes", {})),
+                            item.get("count", 1),
+                            item.get("notes"),
+                            item.get("isPublished", False),
+                            storage_location_id,
+                            item_id,
+                            user_id
+                        ))
+
+                        updated = cur.fetchone()
+
+                        if not updated:
+                            conn.rollback()
+                            return error_response("Item not found")
+
+                        updated_ids.append({"id": updated[0], "carId": updated[1]})
+
+                conn.commit()
+                return success_response(
+                    {"created": created_ids, "updated": updated_ids}
+                )
+
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
 
     except Exception as e:
         print("Error:", e)
@@ -92,5 +199,8 @@ def handler(event, context):
             "headers": {
                 "Access-Control-Allow-Origin": "*",
             },
-            "body": json.dumps({"error": str(e)}),
+            "body": json.dumps({
+                "error": str(e),
+                "stacktrace": traceback.format_exc()
+            }),
         }

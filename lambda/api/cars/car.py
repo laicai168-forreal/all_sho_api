@@ -4,6 +4,7 @@ import psycopg2
 import psycopg2.extras
 import boto3
 import uuid
+import traceback
 
 secrets_client = boto3.client("secretsmanager")
 
@@ -40,6 +41,28 @@ def parse_uuid(value, name):
         raise ValueError(f"Invalid {name}: {value}")
 
 
+# -----------------------------
+# SQL: shared stats CTE
+# (better for scaling vs repeating subqueries)
+# -----------------------------
+STATS_CTE = """
+WITH car_stats AS (
+  SELECT
+    car_id,
+    COUNT(DISTINCT user_id) AS owners_count
+  FROM user_collection_items
+  GROUP BY car_id
+),
+like_stats AS (
+  SELECT
+    car_id,
+    COUNT(*) AS likes_count
+  FROM user_liked_items
+  GROUP BY car_id
+)
+"""
+
+
 # ---------------------------------------------------
 # SQL: single car
 # ---------------------------------------------------
@@ -48,54 +71,61 @@ def fetch_car_detail(cur, car_id, user_id=None):
     params = []
 
     if user_id:
+        own_expr = """
+        EXISTS (
+          SELECT 1
+          FROM user_collection_items uci
+          WHERE uci.car_id = c.id AND uci.user_id = %s
+        )
+        """
+        params.append(user_id)
+    else:
+        own_expr = "false"
+
+    if user_id:
+        liked_expr = "(uli.user_id IS NOT NULL)"
         user_join = """
-        LEFT JOIN user_collection_storage ucs
-          ON ucs.car_id = c.id AND ucs.user_id = %s
         LEFT JOIN user_liked_items uli
           ON uli.car_id = c.id AND uli.user_id = %s
         """
-        params.extend([user_id, user_id])
+        params.append(user_id)
     else:
-        user_join = """
-        LEFT JOIN user_collection_storage ucs ON false
-        LEFT JOIN user_liked_items uli ON false
-        """
+        liked_expr = "false"
+        user_join = "LEFT JOIN user_liked_items uli ON false"
 
     sql = f"""
+    {STATS_CTE}
     SELECT
-      c.id,
-      c.original_id,
-      c.title,
-      c.brand,
-      c.make,
-      c.scale,
-      c.release_date_ai,
-      c.crawled_date,
-      c.image_url,
-      c.images,
-      c.additional_info,
+        c.id,
+        c.original_id,
+        c.title,
+        b.name AS brand,
+        m.name AS make,
+        pl.name AS product_line,
+        c.model_ai,
+        c.scale,
+        c.release_date_ai,
+        c.crawled_date,
+        c.image_url,
+        c.images,
+        c.additional_info,
 
-      (ucs.user_id IS NOT NULL) AS own,
-      (uli.user_id IS NOT NULL) AS liked,
+        {own_expr} AS own,
+        {liked_expr} AS liked,
 
-      COALESCE(oc.owners_count, 0) AS owners_count,
-      COALESCE(lc.likes_count, 0) AS likes_count
+        COALESCE(cs.owners_count, 0) AS owners_count,
+        COALESCE(ls.likes_count, 0) AS likes_count
 
     FROM cars c
 
+    LEFT JOIN brands b ON b.id = c.brand_id
+    LEFT JOIN makes m ON m.id = c.make_id
+    LEFT JOIN product_lines pl ON pl.id = c.product_line_id
+
     {user_join}
 
-    LEFT JOIN (
-      SELECT car_id, COUNT(*) AS owners_count
-      FROM user_collection_storage
-      GROUP BY car_id
-    ) oc ON oc.car_id = c.id
-
-    LEFT JOIN (
-      SELECT car_id, COUNT(*) AS likes_count
-      FROM user_liked_items
-      GROUP BY car_id
-    ) lc ON lc.car_id = c.id
+    LEFT JOIN car_stats cs ON cs.car_id = c.id
+    LEFT JOIN like_stats ls ON ls.car_id = c.id
 
     WHERE c.id = %s
     """
@@ -109,65 +139,84 @@ def fetch_car_detail(cur, car_id, user_id=None):
 # SQL: car list
 # ---------------------------------------------------
 def fetch_car_list(cur, filters, params, user_id, limit, offset, order_clause):
-    user_join = ""
     join_params = []
 
+    # ----- ownership -----
     if user_id:
+        own_expr = """
+        EXISTS (
+          SELECT 1
+          FROM user_collection_items uci
+          WHERE uci.car_id = c.id AND uci.user_id = %s
+        )
+        """
+        join_params.append(user_id)
+    else:
+        own_expr = "false"
+    # ----- liked -----
+    if user_id:
+        liked_expr = "(uli.user_id IS NOT NULL)"
         user_join = """
-        LEFT JOIN user_collection_storage ucs
-          ON ucs.car_id = c.id AND ucs.user_id = %s
         LEFT JOIN user_liked_items uli
           ON uli.car_id = c.id AND uli.user_id = %s
         """
-        join_params = [user_id, user_id]
+        join_params.append(user_id)
     else:
-        user_join = """
-        LEFT JOIN user_collection_storage ucs ON false
-        LEFT JOIN user_liked_items uli ON false
-        """
+        liked_expr = "false"
+        user_join = "LEFT JOIN user_liked_items uli ON false"
 
     where_clause = f"WHERE {' AND '.join(filters)}" if filters else ""
 
     sql = f"""
+    {STATS_CTE}
     SELECT
       c.id,
       c.title,
-      c.brand,
-      c.make,
+      b.name AS brand,
+      m.name AS make,
+      pl.name AS product_line,
+      c.model_ai,
       c.scale,
       c.release_date_ai,
       c.crawled_date,
       c.images,
 
-      (ucs.user_id IS NOT NULL) AS own,
-      (uli.user_id IS NOT NULL) AS liked,
+      {own_expr} AS own,
+      {liked_expr} AS liked,
 
-      COALESCE(oc.owners_count, 0) AS owners_count,
-      COALESCE(lc.likes_count, 0) AS likes_count
+      COALESCE(cs.owners_count, 0) AS owners_count,
+      COALESCE(ls.likes_count, 0) AS likes_count
 
     FROM cars c
+
+    LEFT JOIN brands b ON b.id = c.brand_id
+    LEFT JOIN makes m ON m.id = c.make_id
+    LEFT JOIN product_lines pl ON pl.id = c.product_line_id
+
     {user_join}
 
-    LEFT JOIN (
-      SELECT car_id, COUNT(*) AS owners_count
-      FROM user_collection_storage
-      GROUP BY car_id
-    ) oc ON oc.car_id = c.id
-
-    LEFT JOIN (
-      SELECT car_id, COUNT(*) AS likes_count
-      FROM user_liked_items
-      GROUP BY car_id
-    ) lc ON lc.car_id = c.id
+    LEFT JOIN car_stats cs ON cs.car_id = c.id
+    LEFT JOIN like_stats ls ON ls.car_id = c.id
 
     {where_clause}
     {order_clause}
     LIMIT %s OFFSET %s
     """
 
+    cur.execute(sql, join_params + params + [limit, offset])
+    return cur.fetchall()
+
+
+# ---------------------------------------------------
+# SQL: brands
+# ---------------------------------------------------
+def fetch_brands(cur):
     cur.execute(
-        sql,
-        join_params + params + [limit, offset],
+        """
+        SELECT id, name
+        FROM brands
+        ORDER BY name
+    """
     )
     return cur.fetchall()
 
@@ -201,9 +250,9 @@ def handler(event, context):
             filters = []
             values = []
 
-            if params.get("brand"):
-                filters.append("c.brand = %s")
-                values.append(params["brand"])
+            if params.get("bid"):
+                filters.append("b.id = %s")
+                values.append(params["bid"])
 
             if params.get("keyword"):
                 filters.append("c.search_vector @@ plainto_tsquery(%s)")
@@ -221,15 +270,17 @@ def handler(event, context):
                 order_clause,
             )
 
-            cur.execute(
-                f"""
+            count_sql = f"""
                 SELECT COUNT(*)
                 FROM cars c
+                LEFT JOIN brands b ON b.id = c.brand_id
                 {'WHERE ' + ' AND '.join(filters) if filters else ''}
-                """,
-                values,
-                )
+            """
+
+            cur.execute(count_sql, values)
             total = cur.fetchone()["count"]
+
+            brands = fetch_brands(cur)
 
         conn.close()
 
@@ -240,6 +291,7 @@ def handler(event, context):
                 {
                     "items": items,
                     "total": total,
+                    "brands": brands,
                     "pages": (total + limit - 1) // limit,
                 },
                 default=str,
@@ -251,5 +303,8 @@ def handler(event, context):
         return {
             "statusCode": 500,
             "headers": cors_headers,
-            "body": json.dumps({"error": str(e)}),
+            "body": json.dumps({
+                "error": str(e),
+                "stack": traceback.format_exc()
+            }),
         }

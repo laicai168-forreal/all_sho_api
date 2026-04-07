@@ -21,6 +21,9 @@ import { LikeCollectionConstruct } from './contructs/lambdas/collections/LikeCol
 import { LikeCollectionDynamoConstruct } from './contructs/dynamos/LikeCollectionDynamoConstruct';
 import { DislikeCollectionConstruct } from './contructs/lambdas/collections/DislikeCollectionConstruct';
 import { HttpApiConstruct } from './contructs/apis/HttpApiConstruct';
+import { TWCrawlerConstruct } from './contructs/lambdas/crawlers/TWCrawlerConstruct';
+import { InnoCrawlerConstruct } from './contructs/lambdas/crawlers/InnoCrawlerConstruct';
+import { PopRaceCrawlerConstruct } from './contructs/lambdas/crawlers/PopRaceCrawlerConstruct';
 
 export class LaicaiApiStack extends cdk.Stack {
 	constructor(scope: Construct, id: string, props?: cdk.StackProps) {
@@ -37,7 +40,7 @@ export class LaicaiApiStack extends cdk.Stack {
 		const userItemTable = new UserCollectionDynamoConstruct(this, 'UserItemTable');
 		const likeItemTable = new LikeCollectionDynamoConstruct(this, 'LikeItemTable');
 		const { function: addCollectionFunction } = new AddCollectionConstruct(this, 'UCAdd', { carRDSInstance, secret: dbSecret, vpc: carsVpc });
-		const { function: getCollectionFunction } = new GetCollectionConstruct(this, 'UCGet', { table: userItemTable.table });
+		const { function: getCollectionFunction } = new GetCollectionConstruct(this, 'UCGet', { carRDSInstance, secret: dbSecret, vpc: carsVpc });
 		const { function: deleteCollectionFunction } = new DeleteCollectionConstruct(this, 'UCDelete', { carRDSInstance, secret: dbSecret, vpc: carsVpc });
 		const { function: likeCollectionFunction } = new LikeCollectionConstruct(this, 'UCLike', { carRDSInstance, secret: dbSecret, vpc: carsVpc });
 		const { function: dislikeCollectionFunction } = new DislikeCollectionConstruct(this, 'UCDislike', { carRDSInstance, secret: dbSecret, vpc: carsVpc });
@@ -60,8 +63,11 @@ export class LaicaiApiStack extends cdk.Stack {
 		const carsDynamo = new CarsDynamoConstruct(this, 'CrawlerDB');
 		const crawlerBucket = new CrawlerBucketConstruct(this, 'CrawlerBucket');
 		const { logsTable } = new CrawlerLoggingConstruct(this, 'CrawlerLog');
-		const { function: crawlerFunction } = new CrawlerConstruct(this, 'Crawler', { bucket: crawlerBucket.bucket, secret: dbSecret, vpc: carsVpc, carRDSInstance, logsTable });
-		new CrawlerHelperApiConstruct(this, 'CrawlerHelperApi', { crawlFunction: crawlerFunction });
+		const { function: minigtCrawlFunction } = new CrawlerConstruct(this, 'Crawler', { bucket: crawlerBucket.bucket, secret: dbSecret, vpc: carsVpc, carRDSInstance, logsTable });
+		const { function: tarmacworksCrawlFunction } = new TWCrawlerConstruct(this, 'CrawlerTW', { bucket: crawlerBucket.bucket, secret: dbSecret, vpc: carsVpc, carRDSInstance, logsTable });
+		const { function: innoCrawlFunction } = new InnoCrawlerConstruct(this, 'CrawlerInno', { bucket: crawlerBucket.bucket, secret: dbSecret, vpc: carsVpc, carRDSInstance, logsTable });
+		const { function: popraceCrawlerFunction } = new PopRaceCrawlerConstruct(this, 'CrawlerPoprace', { bucket: crawlerBucket.bucket, secret: dbSecret, vpc: carsVpc, carRDSInstance, logsTable });
+		new CrawlerHelperApiConstruct(this, 'CrawlerHelperApi', { minigtCrawlFunction, tarmacworksCrawlFunction, innoCrawlFunction, popraceCrawlerFunction });
 		const { function: addtionalDataFunction } = new AddtionalCarDataPopulatorConstruct(this, 'AddtionalCarDataPopulator', { bucket: crawlerBucket.bucket, secret: dbSecret, vpc: carsVpc, carRDSInstance, logsTable });
 		new AdditionalDataHelperApiConstruct(this, 'AddtionalDataHelperApi', { addtionalDataFunction });
 
@@ -90,6 +96,7 @@ export class LaicaiApiStack extends cdk.Stack {
 			deleteCollectionFn: deleteCollectionFunction,
 			likeCollectionFn: likeCollectionFunction,
 			dislikeCollectionFn: dislikeCollectionFunction,
+			getCollectionFn: getCollectionFunction,
 			userPoolId: "us-east-1_Fin5RlUdn",
 			appClientId: "6ja446jgvp1839q7tr624d4tc8",
 		});

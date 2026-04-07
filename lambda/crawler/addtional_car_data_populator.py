@@ -40,32 +40,132 @@ def combine_month_year(metadata):
 
     return date(year, month, 1)
 
-
-def update_ai_metadata_only(conn, items, a_version):
+def ensure_chase_variant(conn, base_car_id, log):
+    """
+    Create chase row if not exists.
+    Assumes base row already updated.
+    """
     with conn.cursor() as cur:
-        sql = """
+
+        # Check if chase already exists
+        cur.execute("""
+            SELECT id FROM cars
+            WHERE parent_id = %s
+              AND is_chase = true
+            LIMIT 1
+        """, (base_car_id,))
+        existing = cur.fetchone()
+
+        if existing:
+            log(f"Chase already exists for base {base_car_id}")
+            return
+
+        # Insert chase row by copying base row
+        cur.execute("""
+            INSERT INTO cars (
+                original_id,
+                code,
+                source_url,
+                title,
+                brand_id,
+                scale,
+                images,
+                additional_info,
+                parent_id,
+                is_chase,
+                is_limited,
+                limited_pieces,
+                release_date_ai,
+                description_ai,
+                make_ai,
+                model_ai,
+                a_ver
+            )
+            SELECT
+                original_id,
+                code,
+                source_url,
+                title || ' Chase',
+                brand_id,
+                scale,
+                images,
+                additional_info,
+                id,
+                true,
+                is_limited,
+                limited_pieces,
+                release_date_ai,
+                description_ai,
+                make_ai,
+                model_ai,
+                a_ver
+            FROM cars
+            WHERE id = %s
+        """, (base_car_id,))
+
+        log(f"Created chase variant for {base_car_id}")
+
+def update_ai_metadata_only(conn, items, a_version, log):
+    with conn.cursor() as cur:
+
+        update_sql = """
         UPDATE cars
         SET release_date_ai = %s,
             description_ai  = %s,
             make_ai         = %s,
+            make_id         = %s,
             model_ai        = %s,
+            is_limited      = %s,
+            limited_pieces  = %s,
             a_ver           = %s
         WHERE id = %s
         """
+
         for it in items:
+
             release_date = combine_month_year(it)
+            is_limited = it.get("is_limited", False)
+            limited_pieces = it.get("limited_pieces")
+            make_id = get_or_create_normalized(conn, it.get("make"), log)
+
             cur.execute(
-                sql,
+                update_sql,
                 (
                     release_date,
                     it.get("description"),
                     it.get("make"),
+                    make_id,
                     it.get("model"),
+                    is_limited,
+                    limited_pieces,
                     a_version,
                     it["id"],
                 ),
             )
+
+            if it.get("has_chase"):
+                ensure_chase_variant(conn, it["id"], log)
+
         conn.commit()
+
+def get_or_create_normalized(conn, value, log):
+    if not value:
+        return None
+
+    value = value.strip().lower()
+
+    with conn.cursor() as cur:
+        cur.execute(
+            f"INSERT INTO makes (name) VALUES (%s) "
+            f"ON CONFLICT (name) DO UPDATE SET name = EXCLUDED.name "
+            f"RETURNING id",
+            (value,)
+        )
+        
+        row_id = cur.fetchone()[0]
+
+    log(f"Resolved makes: {value}")
+    return row_id
 
 
 def get_db_conn(creds):
@@ -85,7 +185,8 @@ def get_cars_to_update(conn, new_a_ver, limit, log):
     data_query = f"""
         SELECT id, title, brand
         FROM cars
-        WHERE a_ver IS NULL OR a_ver < %s
+        WHERE parent_id IS NULL  -- only base rows
+            AND a_ver IS NULL OR a_ver < %s
     """
 
     if limit:
@@ -100,6 +201,37 @@ def get_cars_to_update(conn, new_a_ver, limit, log):
         ]
 
     log(f'Updated {', '.join([i['id'] for i in items])}')
+    return items
+
+def get_cars_to_update_by_id(conn, car_ids_string, log):
+    if not car_ids_string:
+        return []
+
+    car_ids = [
+        cid.strip()
+        for cid in car_ids_string.split(",")
+        if cid.strip()
+    ]
+
+    if not car_ids:
+        return []
+
+    data_query = """
+        SELECT id, title, brand
+        FROM cars
+        WHERE id = ANY(%s::uuid[])
+    """
+
+    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute(data_query, (car_ids,))
+        items = cur.fetchall()
+
+        items = [
+            {**t, "title": f"{t['brand']}, {t['title']}"}
+            for t in items
+        ]
+
+    log(f"Updated {', '.join([i['id'] for i in items])}")
     return items
 
 
@@ -125,7 +257,10 @@ def fetch_deepseek_car_metadata(items, log):
         "release_year": number,
         "description": "short profile about this car",
         "make": "car make",
-        "model": "car model"
+        "model": "car model",
+        "has_chase": true, // if it has a chase version, then true, otherwise, false
+        "is_limited": true, // if it is limited eidtion, then true, otherwise, false
+        "limited_pieces": number or null, // if is is_limited is false, this should be null, if is_limited is true, it should be number
     }}
 
     Rules:
@@ -173,6 +308,7 @@ def handler(event, context):
         body = event
 
     job_id = body.get("job_id")
+    car_ids = body.get("car_ids")
     ONE_MONTH = 30 * 24 * 60 * 60
 
     def log(msg):
@@ -190,20 +326,24 @@ def handler(event, context):
     log("Start populating car additional data...")
 
     try:
-        a_version = body.get("a_version", 0)
+        a_version = body.get("a_version", 1)
         limit = body.get("limit")
 
         creds = get_db_credentials()
         conn = get_db_conn(creds)
 
-        items_to_update = get_cars_to_update(conn, a_version, limit, log)
+        if car_ids:
+            items_to_update = get_cars_to_update_by_id(conn, car_ids, log)
+        else:
+            items_to_update = get_cars_to_update(conn, a_version, limit, log)
         items_to_insert = fetch_deepseek_car_metadata(items_to_update, log)
         log(f"Getting new data from AI: {items_to_insert}")
 
         if len(items_to_insert) > 0:
-            update_ai_metadata_only(conn, items_to_insert, a_version)
+            update_ai_metadata_only(conn, items_to_insert, a_version, log)
 
         conn.close()
+        log(f"{[t['id'] for t in items_to_insert]}")
 
         log("DONE")
 

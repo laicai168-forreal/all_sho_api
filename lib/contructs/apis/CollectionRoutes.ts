@@ -11,17 +11,27 @@ interface CollectionRoutesProps {
     deleteCollectionFn: LambdaFunction;
     likeCollectionFn: LambdaFunction;
     dislikeCollectionFn: LambdaFunction;
+    getCollectionFn: LambdaFunction;
 }
 
 export class CollectionRoutes extends Construct {
     constructor(scope: Construct, id: string, props: CollectionRoutesProps) {
         super(scope, id);
 
-        const { httpApi, authorizer, addCollectionFn, deleteCollectionFn, likeCollectionFn, dislikeCollectionFn } = props;
+        const {
+            httpApi,
+            authorizer,
+            addCollectionFn,
+            deleteCollectionFn,
+            likeCollectionFn,
+            dislikeCollectionFn,
+            getCollectionFn,
+        } = props;
 
         const routes = [
             { path: "/collections", method: apigwv2.HttpMethod.POST, fn: addCollectionFn },
             { path: "/collections", method: apigwv2.HttpMethod.DELETE, fn: deleteCollectionFn },
+            { path: "/collections", method: apigwv2.HttpMethod.GET, fn: getCollectionFn },
             { path: "/likes", method: apigwv2.HttpMethod.POST, fn: likeCollectionFn },
             { path: "/likes", method: apigwv2.HttpMethod.DELETE, fn: dislikeCollectionFn },
         ];

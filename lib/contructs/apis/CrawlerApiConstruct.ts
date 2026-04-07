@@ -3,7 +3,10 @@ import * as apigateway from "aws-cdk-lib/aws-apigateway";
 import { Function } from "aws-cdk-lib/aws-lambda";
 
 interface CrawlerHelperApiConstructProps {
-    crawlFunction: Function,
+    minigtCrawlFunction: Function,
+    tarmacworksCrawlFunction: Function,
+    innoCrawlFunction: Function,
+    popraceCrawlerFunction: Function,
 }
 
 export class CrawlerHelperApiConstruct extends Construct {
@@ -12,7 +15,13 @@ export class CrawlerHelperApiConstruct extends Construct {
     constructor(scope: Construct, id: string, props: CrawlerHelperApiConstructProps) {
         super(scope, id);
 
-        const { crawlFunction } = props;
+        const {
+            minigtCrawlFunction,
+            tarmacworksCrawlFunction,
+            innoCrawlFunction,
+            popraceCrawlerFunction,
+        } = props;
+
         this.api = new apigateway.RestApi(this, "CrawlerHelperApi", {
             restApiName: "Crawler Api Helpers",
             defaultCorsPreflightOptions: {
@@ -21,8 +30,14 @@ export class CrawlerHelperApiConstruct extends Construct {
             },
         });
 
-        const crawl = this.api.root.addResource('crawl');
+        const crawlMinigt = this.api.root.addResource('crawl_minigt');
+        const crawlTarmacworks = this.api.root.addResource('crawl_tarmacworks');
+        const crawlInno = this.api.root.addResource('crawl_inno');
+        const crawPoprace = this.api.root.addResource('crawl_poprace');
 
-        crawl.addMethod("POST", new apigateway.LambdaIntegration(crawlFunction));
+        crawlMinigt.addMethod("POST", new apigateway.LambdaIntegration(minigtCrawlFunction));
+        crawlTarmacworks.addMethod("POST", new apigateway.LambdaIntegration(tarmacworksCrawlFunction));
+        crawlInno.addMethod("POST", new apigateway.LambdaIntegration(innoCrawlFunction));
+        crawPoprace.addMethod("POST", new apigateway.LambdaIntegration(popraceCrawlerFunction));
     }
 }

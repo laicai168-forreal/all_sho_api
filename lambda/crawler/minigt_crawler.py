@@ -50,6 +50,12 @@ urls = {
     "inno64": os.getenv("INNO64_URL"),
 }
 
+NORMALIZATION_CACHE = {
+    "brands": {},
+    "makes": {},
+    "product_lines": {}
+}
+
 
 def get_db_credentials():
     resp = secrets_client.get_secret_value(SecretId=SECRET_ARN)
@@ -62,27 +68,22 @@ def get_db_credentials():
     }
 
 
-def upsert_items(conn, items):
+def upsert_items(conn, items, log):
     with conn.cursor() as cur:
-        sql = """
-        INSERT INTO cars (code, original_id, source_url, title, brand, make, scale, crawled_date, c_ver, images, additional_info)
-        VALUES %s
-        ON CONFLICT (code)
-        DO UPDATE SET
-          original_id = EXCLUDED.original_id,
-          source_url = EXCLUDED.source_url,
-          title = EXCLUDED.title,
-          brand = EXCLUDED.brand,
-          make = EXCLUDED.make,
-          scale = EXCLUDED.scale,
-          crawled_date = EXCLUDED.crawled_date,
-          c_ver = EXCLUDED.c_ver,
-          images = EXCLUDED.images,
-          additional_info = EXCLUDED.additional_info;
-        """
 
         values = []
+
         for it in items:
+            brand_id = get_or_create_normalized(conn, "brands", it.get("brand"), log)
+            make_id = get_or_create_normalized(conn, "makes", it.get("make"), log)
+            product_line_id = get_or_create_normalized(
+                conn,
+                "product_lines",
+                it.get("product_line"),
+                log,
+                brand_id=brand_id
+            )
+
             images = it.get("images", [])
             if isinstance(images, (dict, list)):
                 images = json.dumps(images)
@@ -97,8 +98,11 @@ def upsert_items(conn, items):
                     it.get("original_id"),
                     it.get("source_url"),
                     it.get("title"),
+                    brand_id,
                     it.get("brand"),
+                    make_id,
                     it.get("make"),
+                    product_line_id,
                     it.get("scale"),
                     it.get("crawled_date"),
                     it.get("c_ver"),
@@ -106,6 +110,41 @@ def upsert_items(conn, items):
                     additional_info,
                 )
             )
+
+        sql = """
+        INSERT INTO cars (
+            code,
+            original_id,
+            source_url,
+            title,
+            brand_id,
+            brand,
+            make_id,
+            make,
+            product_line_id,
+            scale,
+            crawled_date,
+            c_ver,
+            images,
+            additional_info
+        )
+        VALUES %s
+        ON CONFLICT (code)
+        DO UPDATE SET
+            original_id = EXCLUDED.original_id,
+            source_url = EXCLUDED.source_url,
+            title = EXCLUDED.title,
+            brand_id = EXCLUDED.brand_id,
+            brand = EXCLUDED.brand,
+            make_id = EXCLUDED.make_id,
+            make = EXCLUDED.make,
+            product_line_id = EXCLUDED.product_line_id,
+            scale = EXCLUDED.scale,
+            crawled_date = EXCLUDED.crawled_date,
+            c_ver = EXCLUDED.c_ver,
+            images = EXCLUDED.images,
+            additional_info = EXCLUDED.additional_info
+        """
 
         execute_values(cur, sql, values)
         conn.commit()
@@ -219,17 +258,17 @@ def download_image_to_s3(img_url, s3_bucket, prefix="images/"):
     )
     return s3_key
 
-def get_lower_ver_rows(conn, version, brand, limit=100):
-    with conn.cursor(cursor_factory=RealDictCursor) as cur:
-        cur.execute("""
-            SELECT source_url, id, images
-            FROM cars
-            WHERE c_ver < %s AND brand = %s
-            ORDER BY c_ver ASC
-            LIMIT %s
-        """, (version, brand, limit))
+# def get_lower_ver_rows(conn, version, brand, limit=100):
+#     with conn.cursor(cursor_factory=RealDictCursor) as cur:
+#         cur.execute("""
+#             SELECT source_url, id, images
+#             FROM cars
+#             WHERE c_ver < %s AND brand = %s
+#             ORDER BY c_ver ASC
+#             LIMIT %s
+#         """, (version, brand, limit))
 
-        return cur.fetchall()
+#         return cur.fetchall()
 
 def get_existing_urls(conn, urls):
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
@@ -239,9 +278,49 @@ def get_existing_urls(conn, urls):
         )
         return cur.fetchall()
 
+def get_or_create_normalized(conn, table, value, log, brand_id=None):
+    if not value:
+        return None
+
+    value = value.strip().lower()
+    
+    # Create a unique cache key for product_lines since name isn't unique globally
+    cache_key = f"{value}_{brand_id}" if table == "product_lines" else value
+
+    if cache_key in NORMALIZATION_CACHE[table]:
+        return NORMALIZATION_CACHE[table][cache_key]
+
+    with conn.cursor() as cur:
+        if table == "product_lines":
+            # Product lines require the brand_id for the unique constraint
+            cur.execute(
+                f"""
+                INSERT INTO {table} (name, brand_id)
+                VALUES (%s, %s)
+                ON CONFLICT (name, brand_id) 
+                DO UPDATE SET name = EXCLUDED.name
+                RETURNING id
+                """,
+                (value, brand_id)
+            )
+        else:
+            # brands and makes (assuming they only have 'name' constraints)
+            cur.execute(
+                f"INSERT INTO {table} (name) VALUES (%s) "
+                f"ON CONFLICT (name) DO UPDATE SET name = EXCLUDED.name "
+                f"RETURNING id",
+                (value,)
+            )
+        
+        row_id = cur.fetchone()[0]
+
+    NORMALIZATION_CACHE[table][cache_key] = row_id
+    log(f"Resolved {table}: {value}")
+    return row_id
 
 
-def crawl_minigt_product_page(url, historical_image_urls, version, log, s3_bucket=S3_BUCKET):
+
+def crawl_minigt_product_page(url, historical_image_urls, log, s3_bucket=S3_BUCKET):
     log(f"Crawling product {url}")
     time.sleep(REQUEST_DELAY)
     resp = safe_get(url)
@@ -257,6 +336,16 @@ def crawl_minigt_product_page(url, historical_image_urls, version, log, s3_bucke
     )
 
     details = parse_product_details(soup)
+
+    if not details.get("id"):
+        return None
+    
+    item_no = details.get("id", "").strip()
+    product_line = None
+    if item_no.startswith("KHMG"):
+        product_line = "Kaido House"
+    if item_no.startswith("QZ"):
+        product_line = "Qube Carz"
 
     image_urls = get_minigt_og_image(soup, url)
     images = []
@@ -278,12 +367,13 @@ def crawl_minigt_product_page(url, historical_image_urls, version, log, s3_bucke
 
     item = {
         "code": f"MGT_{details["id"]}",
-        "original_id": details["id"],
+        "original_id":item_no,
         "brand": "minigt",
         "make": details["Marque"],
+        "product_line": product_line,
         "title": title,
         "source_url": url,
-        "c_ver": version,
+        "c_ver": 1,
         "additional_info": {
             "source": url,
         },
@@ -292,6 +382,8 @@ def crawl_minigt_product_page(url, historical_image_urls, version, log, s3_bucke
         "crawled_date": datetime.datetime.now(datetime.timezone.utc),
         "scale": "1:64",
     }
+
+    log(f"### Crawled: {item["original_id"]}, {item["make"]}, {title}, {item["product_line"]}, {item["source_url"]}")
 
     return item
 
@@ -564,31 +656,6 @@ def handler(event, context):
     log('Start crawling')
 
     try: 
-        version = body.get("version")
-        brand = body.get("brand")
-        default_limit = 0
-        max_pages = body.get("max_pages", default_limit)
-        known_brands = ['minigt', 'hotwheels']
-        if not version or version == 0:
-            return {
-                    "statusCode": 500,
-                    "body": json.dumps({"error": 'no version is specified, version should not be 0, you need to in put a version'}),
-                }
-        if not brand:
-            return {
-                    "statusCode": 500,
-                    "body": json.dumps({"error": 'no brand specified, you need to input a brand name'}),
-                }
-        
-        if brand not in known_brands:
-            return {
-                    "statusCode": 500,
-                    "body": json.dumps({"error": f'brand name you give does not exist, use those ones {', '.join(known_brands)}'}),
-                }
-        
-        if not max_pages:
-            log(f'no limit is given, setting it to default {default_limit}')
-        
         creds = get_db_credentials()
         conn = get_db_conn(creds)
         urls = body.get("product_urls", [])
@@ -605,65 +672,76 @@ def handler(event, context):
         # ]
         # print(f'historical images: {historical_image_urls}')
         
-        if "catalog_url" in body and "brand" in body and len(urls) < max_pages:
+        if "catalog_url" in body:
             try:
-                if body.get("brand") == "minigt":
-                    urls.extend(extract_minigt_links_from_catalog(
-                        body["catalog_url"], urls, log, max_pages=max_pages
-                    ))
+                urls.extend(extract_minigt_links_from_catalog(
+                    body["catalog_url"], urls, log
+                ))
                 # if body.get("brand") == "hotwheels":
                 #     urls = extract_hotwheels_links_from_catalog(
                 #         body["catalog_url"], max_pages=max_pages
                 #     )
-                if body.get("brand") == "hotwheels":
-                    urls.extend(extract_hotwheels_164custom_links_from_catalog(
-                        body["catalog_url"], log, max_pages=max_pages,
-                    ))
+                # if body.get("brand") == "hotwheels":
+                #     urls.extend(extract_hotwheels_164custom_links_from_catalog(
+                #         body["catalog_url"], log
+                #     ))
             except Exception as e:
                 log(f"Failed to extract from catalog: {e}")
                 return {"error": str(e)}
-        
-        historical_rows = get_existing_urls(conn, urls)
+            
+        historical_image_urls = []
+            
+        override = body.get("override")
 
-        historical_image_urls = [
-            img["original_url"]
-            for row in historical_rows
-            if row.get("images")
-            for img in row["images"]
-            if img.get("original_url")
-        ]
+        if not override: 
+            historical_rows = get_existing_urls(conn, urls)
 
-        historical_urls = [
-            row["source_url"]
-            for row in historical_rows
-            if row.get("source_url")
-        ]
+            historical_image_urls = [
+                img["original_url"]
+                for row in historical_rows
+                if row.get("images")
+                for img in row["images"]
+                if img.get("original_url")
+            ]
 
-        print(f'history url {historical_urls}, current url {urls}')
+            historical_urls = [
+                row["source_url"]
+                for row in historical_rows
+                if row.get("source_url")
+            ]
 
-        urls = [
-            u for u in urls if u not in historical_urls
-        ]
+            for hu in historical_urls:
+                log(f"### Crawled: {hu}, this url is skipped because override mode is OFF")
+
+            print(f'history url {historical_urls}, current url {urls}')
+
+            urls = [
+                u for u in urls if u not in historical_urls
+            ]
+        else:
+            log("Override mode is ON, it will erase the existing matching rows and replace with the new crawled data")
 
         items_to_insert = []
         results = []
         
         for u in urls:
             try:
-                if brand == "minigt":
-                    item = crawl_minigt_product_page(u, historical_image_urls, version, log)
-                    items_to_insert.append(item)
+                item = crawl_minigt_product_page(u, historical_image_urls, log)
+                if not item.get("original_id"):
+                    log(f"skipping {u}, because this page doesn't exist")
+                    break
+                items_to_insert.append(item)
 
                 # elif brand == "hotwheels":
                 #     items = crawl_hotwheels_product_page(u)
                 #     items_to_insert.extend(items)
 
-                elif brand == "hotwheels":
-                    item = crawl_hotwheels_164custom_product_page(u, historical_image_urls, version, log)
-                    items_to_insert.append(item)
-                    # return {"count": len(items_to_insert), "results": items_to_insert}
-                else:
-                    log("no brand specified")
+                # elif brand == "hotwheels":
+                #     item = crawl_hotwheels_164custom_product_page(u, historical_image_urls, version, log)
+                #     items_to_insert.append(item)
+                #     # return {"count": len(items_to_insert), "results": items_to_insert}
+                # else:
+                #     log("no brand specified")
                 
                 print(f"""
                     {len(body.get("product_urls", []))} given urls.
@@ -674,7 +752,7 @@ def handler(event, context):
                 log(f"Failed crawling {u}: {e}")
                 results.append({"url": u, "error": str(e)})
         if len(items_to_insert) > 0:
-            upsert_items(conn, items_to_insert)
+            upsert_items(conn, items_to_insert, log)
 
         conn.close()
         log('DONE')
@@ -682,15 +760,7 @@ def handler(event, context):
         return {
             "statusCode": 200,
             "body": json.dumps({
-                "message": "crawl completed",
-                "brand": brand,
-                "version": version,
-                "total_urls_received": len(body.get("product_urls", [])),
-                "new_urls_crawled": len(urls),
-                "inserted_items_length": len(items_to_insert),
-                "inserted_items": items_to_insert,
-                "errors": results,
-                "logs": logs
+                "message": "crawl completed"
             })
         }
 
@@ -713,22 +783,11 @@ if __name__ == "__main__":
     parser.add_argument(
         "--product-urls", nargs="*", help="Specific product pages to crawl"
     )
-    parser.add_argument(
-        "--version", help="Specific version"
-    )
-    parser.add_argument(
-        "--brand", help="Specific brand"
-    )
     args = parser.parse_args()
     event = {}
     if args.product_urls:
         event["product_urls"] = args.product_urls
-        event["brand"] = args.brand
-        event["version"] = args.version
     if args.catalog:
         event["catalog_url"] = args.catalog
-        event["max_pages"] = args.max_pages
-        event["brand"] = args.brand
-        event["version"] = args.version
     out = handler(event, None)
     print(json.dumps(out, indent=2))
