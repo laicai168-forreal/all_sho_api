@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import 'dotenv/config';
 import * as cdk from 'aws-cdk-lib';
 import { LaicaiApiStack } from '../lib/laicai_api-stack';
 

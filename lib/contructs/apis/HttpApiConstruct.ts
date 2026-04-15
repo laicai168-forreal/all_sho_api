@@ -16,6 +16,7 @@ interface HttpApiConstructProps {
 
 export class HttpApiConstruct extends Construct {
     public readonly httpApi: apigwv2.HttpApi;
+    public readonly authorizer: apigwv2.IHttpRouteAuthorizer;
 
     constructor(scope: Construct, id: string, props: HttpApiConstructProps) {
         super(scope, id);
@@ -49,6 +50,8 @@ export class HttpApiConstruct extends Construct {
             userPoolId,
             appClientId,
         });
+
+        this.authorizer = authorizer.authorizer;
 
         // Collection routes
         new CollectionRoutes(this, "CollectionRoutes", {

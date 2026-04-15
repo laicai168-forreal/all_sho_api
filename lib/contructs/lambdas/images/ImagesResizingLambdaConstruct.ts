@@ -19,7 +19,18 @@ export class ImagesResizingLambdaConstruct extends Construct {
         const { imageBucket, oldBucket } = props;
 
         const pillowLayer = new lambda.LayerVersion(this, 'PillowLayer', {
-            code: lambda.Code.fromAsset(path.join(__dirname, '../../../../lambda-layer/lambda_layer.zip')),
+            code: lambda.Code.fromAsset(path.join(__dirname, '../../../../lambda-layer'), {
+                bundling: {
+                    image: lambda.Runtime.PYTHON_3_12.bundlingImage,
+                    command: [
+                        'bash', '-c',
+                        [
+                            'pip install -r requirements.txt -t /asset-output/python',
+                            'cp -r python/* /asset-output/python'
+                        ].join(' && ')
+                    ],
+                },
+            }),
             compatibleRuntimes: [lambda.Runtime.PYTHON_3_12],
             description: 'Pillow layer for image processing',
         });

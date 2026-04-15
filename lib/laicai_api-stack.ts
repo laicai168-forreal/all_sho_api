@@ -1,33 +1,44 @@
 import * as cdk from 'aws-cdk-lib';
 import { Construct } from 'constructs';
-import { CrawlerConstruct } from './contructs/lambdas/crawlers/CarCrawlerConstruct';
-import { CarsDynamoConstruct } from './contructs/dynamos/CarsDynamoConstruct';
-import { CrawlerBucketConstruct } from './contructs/s3/crawlerBucket';
-import { CarApi } from './contructs/lambdas/cars/CarsApiConstruct';
-import { UserCollectionDynamoConstruct } from './contructs/dynamos/UserCollectionDynamoConstruct';
-import { AddCollectionConstruct } from './contructs/lambdas/collections/AddCollectionConstruct';
-import { GetCollectionConstruct } from './contructs/lambdas/collections/GetCollectionConstruct';
-import { DeleteCollectionConstruct } from './contructs/lambdas/collections/DeleteCollectionConstruct';
-import { AddtionalCarDataPopulatorConstruct } from './contructs/lambdas/crawlers/AddtionalCarDataConstruct';
-import { ImagesResizingLambdaConstruct } from './contructs/lambdas/images/ImagesResizingLambdaConstruct';
-import { ImageResizeCfnConstruct } from './contructs/cloudFront/ImageResizeCfnConstruct';
-import { ImageResizeApiConstruct } from './contructs/apis/ImageResizeApiConstruct';
-import { CarsRDSInstanceConstruct } from './contructs/rds/CarsRDSInstanceConstruct';
-import { CarsDataVpcConstruct } from './contructs/vpc/CarsDataVpcConstruct';
+import { AdditionalDataHelperApiConstruct } from './contructs/apis/AdditionalDataHelperApiConstruct';
 import { CrawlerHelperApiConstruct } from './contructs/apis/CrawlerApiConstruct';
 import { CrawlerLoggingConstruct } from './contructs/apis/CrawlerLoggingConstruct';
-import { AdditionalDataHelperApiConstruct } from './contructs/apis/AdditionalDataHelperApiConstruct';
-import { LikeCollectionConstruct } from './contructs/lambdas/collections/LikeCollectionConstruct';
-import { LikeCollectionDynamoConstruct } from './contructs/dynamos/LikeCollectionDynamoConstruct';
-import { DislikeCollectionConstruct } from './contructs/lambdas/collections/DislikeCollectionConstruct';
 import { HttpApiConstruct } from './contructs/apis/HttpApiConstruct';
-import { TWCrawlerConstruct } from './contructs/lambdas/crawlers/TWCrawlerConstruct';
+import { UserFastApiConstruct } from './contructs/apis/UserFastApiConstruct';
+import { ImageResizeCfnConstruct } from './contructs/cloudFront/ImageResizeCfnConstruct';
+import { CarsDynamoConstruct } from './contructs/dynamos/CarsDynamoConstruct';
+import { LikeCollectionDynamoConstruct } from './contructs/dynamos/LikeCollectionDynamoConstruct';
+import { UserCollectionDynamoConstruct } from './contructs/dynamos/UserCollectionDynamoConstruct';
+import { CarApi } from './contructs/lambdas/cars/CarsApiConstruct';
+import { AddCollectionConstruct } from './contructs/lambdas/collections/AddCollectionConstruct';
+import { DeleteCollectionConstruct } from './contructs/lambdas/collections/DeleteCollectionConstruct';
+import { DislikeCollectionConstruct } from './contructs/lambdas/collections/DislikeCollectionConstruct';
+import { GetCollectionConstruct } from './contructs/lambdas/collections/GetCollectionConstruct';
+import { LikeCollectionConstruct } from './contructs/lambdas/collections/LikeCollectionConstruct';
+import { AddtionalCarDataPopulatorConstruct } from './contructs/lambdas/crawlers/AddtionalCarDataConstruct';
+import { CrawlerConstruct } from './contructs/lambdas/crawlers/CarCrawlerConstruct';
 import { InnoCrawlerConstruct } from './contructs/lambdas/crawlers/InnoCrawlerConstruct';
 import { PopRaceCrawlerConstruct } from './contructs/lambdas/crawlers/PopRaceCrawlerConstruct';
+import { TWCrawlerConstruct } from './contructs/lambdas/crawlers/TWCrawlerConstruct';
+import { ImagesResizingLambdaConstruct } from './contructs/lambdas/images/ImagesResizingLambdaConstruct';
+import { CommonLayerConstruct } from './contructs/layers/CommonLayerConstruct';
+import { CarsRDSInstanceConstruct } from './contructs/rds/CarsRDSInstanceConstruct';
+import { CrawlerBucketConstruct } from './contructs/s3/crawlerBucket';
+import { ProfileImageBucketConstruct } from './contructs/s3/ProfileImageBucketConstruct';
+import { CarsDataVpcConstruct } from './contructs/vpc/CarsDataVpcConstruct';
 
 export class LaicaiApiStack extends cdk.Stack {
 	constructor(scope: Construct, id: string, props?: cdk.StackProps) {
 		super(scope, id, props);
+
+		const cognitoUserPoolId =
+			process.env.COGNITO_USER_POOL_ID ||
+			process.env.REACT_APP_COGNITO_USER_POOL_ID ||
+			'us-east-1_ZZtovbzxr';
+		const cognitoAppClientId =
+			process.env.COGNITO_APP_CLIENT_ID ||
+			process.env.REACT_APP_COGNITO_CLIENT_ID ||
+			'1rfcnq8a774inv07a9rlmp3vnd';
 
 		///////////////////////////////////////////////////////////////
 		// Higher level
@@ -97,12 +108,32 @@ export class LaicaiApiStack extends cdk.Stack {
 			likeCollectionFn: likeCollectionFunction,
 			dislikeCollectionFn: dislikeCollectionFunction,
 			getCollectionFn: getCollectionFunction,
-			userPoolId: "us-east-1_Fin5RlUdn",
-			appClientId: "6ja446jgvp1839q7tr624d4tc8",
+			userPoolId: cognitoUserPoolId,
+			appClientId: cognitoAppClientId,
 		});
+
 		new cdk.CfnOutput(this, "UserCollectionsHttpApiUrl", {
 			value: httpApiConstruct.httpApi.url || "Found URL for http api",
 			exportName: "UserCollectionsHttpApiUrl",
+		});
+
+		/////////////////////////////////////////////////////////////
+		// Lambda layer stack
+		const { layer: commonLayer } = new CommonLayerConstruct(this, "CommonLayer");
+
+		// User constructs
+		const profileImageBucket = new ProfileImageBucketConstruct(this, 'ProfileImageBucket');
+
+		////////////////////////////////////////////////////
+		// Backend API stack with FastAPI, will use the same authorizer and http api as the user collection stack, and connect to the same RDS instance, but in a different lambda function, which is more flexible for future development
+		new UserFastApiConstruct(this, "UserFastApi", {
+			httpApi: httpApiConstruct.httpApi,
+			authorizer: httpApiConstruct.authorizer,
+			vpc: carsVpc,
+			rds: carRDSInstance,
+			dbSecret: dbSecret,
+			layer: commonLayer, // your existing lambda layer
+			profileImageBucket: profileImageBucket.bucket,
 		});
 
 		//////////////////////////////////////////////////////////////
