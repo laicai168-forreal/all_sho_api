@@ -93,7 +93,6 @@ def _resolve_admin_car_payload(payload):
     resolved["make"] = make["name"] if make else None
     resolved["product_line_id"] = product_line["id"] if product_line else None
     resolved["product_line"] = product_line["name"] if product_line else _normalize_lookup_name(resolved.get("product_line"))
-    resolved.pop("release_date_ai", None)
 
     return resolved
 
@@ -162,6 +161,37 @@ def list_user_change_requests(sub, status=None, limit=20, offset=0):
     )
 
 
+def get_user_change_request(sub, request_id):
+    # Return both the request and the current linked car so the customer editor
+    # can show the pending suggestion beside the latest canonical data.
+    user = _get_user_by_sub_or_401(sub)
+    request = car_repository.get_change_request_detail(request_id)
+    if not request or request["submitted_by"] != user["id"]:
+        raise HTTPException(status_code=404, detail="Change request not found")
+
+    return {
+        "request": request,
+        "currentCar": car_repository.get_car_by_id(request["car_id"]) if request.get("car_id") else None,
+    }
+
+
+def update_user_change_request(sub, request_id, body):
+    # Customers may revise only their own pending requests. Reviewed requests
+    # stay immutable so the audit trail matches what an admin actually saw.
+    user = _get_user_by_sub_or_401(sub)
+    existing = car_repository.get_change_request(request_id)
+    if not existing or existing["submitted_by"] != user["id"]:
+        raise HTTPException(status_code=404, detail="Change request not found")
+    if existing["status"] != "pending":
+        raise HTTPException(status_code=409, detail="Only pending requests can be updated")
+
+    updated = car_repository.update_change_request(request_id, body)
+    return {
+        "request": updated,
+        "currentCar": car_repository.get_car_by_id(updated["car_id"]) if updated.get("car_id") else None,
+    }
+
+
 def get_user_change_request_summary(sub):
     user = _get_user_by_sub_or_401(sub)
     summary = car_repository.get_weekly_change_request_summary(user["id"])
@@ -186,23 +216,67 @@ def list_admin_change_requests(sub, status=None, limit=20, offset=0):
     )
 
 
-def review_admin_change_request(sub, request_id, status, review_notes):
+def get_admin_change_request(sub, request_id):
+    # Admin review needs the enriched request row plus the latest linked car so
+    # reviewers can compare "suggested" against "current" in one round-trip.
+    require_admin(sub)
+    request = car_repository.get_change_request_detail(request_id)
+    if not request:
+        raise HTTPException(status_code=404, detail="Change request not found")
+
+    return {
+        "request": request,
+        "currentCar": car_repository.get_car_by_id(request["car_id"]) if request.get("car_id") else None,
+    }
+
+
+def review_admin_change_request(sub, request_id, status, review_notes, final_payload=None):
     admin = require_admin(sub)
     if status not in {"approved", "rejected"}:
         raise HTTPException(status_code=400, detail="Invalid review status")
 
-    existing = car_repository.get_change_request(request_id)
+    existing = car_repository.get_change_request_detail(request_id)
     if not existing:
         raise HTTPException(status_code=404, detail="Change request not found")
 
     if existing["status"] != "pending":
         raise HTTPException(status_code=409, detail="Change request already reviewed")
 
+    applied_car = None
+    if status == "approved":
+        # The repository only updates columns that are explicitly present in the
+        # payload. That is the contract we want for reviewed suggestions too:
+        # omitted fields are ignored, not blanked out or inherited implicitly.
+        # This keeps customer requests safe even when the frontend hides fields
+        # like source_url or other admin-only columns in the future.
+        merged_payload = {
+            **(existing.get("payload") or {}),
+            **(final_payload or {}),
+        }
+
+        if existing.get("car_id"):
+            applied_car = car_repository.update_car(
+                existing["car_id"],
+                _resolve_admin_car_payload(merged_payload),
+                admin["id"],
+            )
+            if not applied_car:
+                raise HTTPException(status_code=404, detail="Linked car not found")
+        else:
+            applied_car = car_repository.create_car(
+                _resolve_admin_car_payload(merged_payload),
+                admin["id"],
+            )
+
     reviewed = car_repository.review_change_request(
         request_id=request_id,
         status=status,
         review_notes=review_notes,
         reviewed_by=admin["id"],
+        car_id=applied_car["id"] if applied_car else existing.get("car_id"),
     )
 
-    return reviewed
+    return {
+        "request": reviewed,
+        "car": applied_car,
+    }

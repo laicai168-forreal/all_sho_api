@@ -17,7 +17,6 @@ ALLOWED_CAR_FIELDS = {
     "brand": "brand",
     "make": "make",
     "scale": "scale",
-    "release_date_ai": "release_date_ai",
     "image_url": "image_url",
     "additional_info": "additional_info",
     "title": "title",
@@ -328,7 +327,6 @@ def duplicate_car(source_car_id, actor_user_id, overrides=None):
         "brand": overrides.get("brand", source.get("brand")),
         "make": overrides.get("make", source.get("make")),
         "scale": overrides.get("scale", source.get("scale")),
-        "release_date_ai": overrides.get("release_date_ai", source.get("release_date_ai")),
         "image_url": overrides.get("image_url", source.get("image_url")),
         "additional_info": overrides.get("additional_info", source.get("additional_info")),
         "title": overrides.get("title", source.get("title")),
@@ -429,6 +427,70 @@ def get_change_request(request_id):
         return cur.fetchone()
 
 
+def get_change_request_detail(request_id):
+    # Use the joined/detail shape for review screens and customer request pages
+    # so usernames and current car context do not require extra list queries.
+    conn = get_db_connection()
+
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute(
+            """
+            SELECT
+                ccr.*,
+                u.username AS submitted_by_username,
+                reviewer.username AS reviewed_by_username,
+                c.title AS car_title
+            FROM car_change_requests ccr
+            LEFT JOIN users u ON u.id = ccr.submitted_by
+            LEFT JOIN users reviewer ON reviewer.id = ccr.reviewed_by
+            LEFT JOIN cars c ON c.id = ccr.car_id
+            WHERE ccr.id = %s
+            """,
+            (request_id,),
+        )
+        return cur.fetchone()
+
+
+def update_change_request(request_id, payload):
+    # This is intentionally a partial update. Missing keys mean "leave the
+    # stored request as-is", while present keys can overwrite or clear values.
+    conn = get_db_connection()
+    assignments = []
+    values = []
+
+    if "request_type" in payload:
+        assignments.append("request_type = %s")
+        values.append(payload["request_type"])
+
+    if "payload" in payload:
+        assignments.append("payload = %s::jsonb")
+        values.append(json.dumps(payload.get("payload") or {}))
+
+    if "uploaded_images" in payload:
+        assignments.append("uploaded_images = %s::jsonb")
+        values.append(json.dumps(payload.get("uploaded_images") or []))
+
+    if not assignments:
+        return get_change_request_detail(request_id)
+
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute(
+            f"""
+            UPDATE car_change_requests
+            SET {", ".join(assignments)}
+            WHERE id = %s
+            RETURNING *
+            """,
+            values + [request_id],
+        )
+        updated = cur.fetchone()
+
+    if not updated:
+        return None
+
+    return get_change_request_detail(request_id)
+
+
 def count_weekly_change_requests(submitted_by):
     conn = get_db_connection()
 
@@ -464,7 +526,9 @@ def get_weekly_change_request_summary(submitted_by):
         return cur.fetchone()
 
 
-def review_change_request(request_id, status, review_notes, reviewed_by):
+def review_change_request(request_id, status, review_notes, reviewed_by, car_id=None):
+    # Store the resolved car_id after approval so new-car suggestions become
+    # linked to the created car for later history/detail views.
     conn = get_db_connection()
 
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
@@ -475,10 +539,16 @@ def review_change_request(request_id, status, review_notes, reviewed_by):
                 status = %s,
                 review_notes = %s,
                 reviewed_by = %s,
-                reviewed_at = NOW()
+                reviewed_at = NOW(),
+                car_id = COALESCE(%s, car_id)
             WHERE id = %s
             RETURNING *
             """,
-            (status, review_notes, reviewed_by, request_id),
+            (status, review_notes, reviewed_by, car_id, request_id),
         )
-        return cur.fetchone()
+        reviewed = cur.fetchone()
+
+    if not reviewed:
+        return None
+
+    return get_change_request_detail(request_id)

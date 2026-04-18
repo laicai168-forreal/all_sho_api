@@ -41,3 +41,10 @@ class CarChangeRequestCreate(BaseModel):
 class CarChangeRequestReview(BaseModel):
     status: str
     reviewNotes: Optional[str] = None
+    finalPayload: Optional[dict[str, Any]] = None
+
+
+class CarChangeRequestUpdate(BaseModel):
+    request_type: Optional[str] = None
+    payload: Optional[dict[str, Any]] = None
+    uploaded_images: Optional[list[dict[str, Any]]] = None
