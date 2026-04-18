@@ -28,6 +28,7 @@ def get_user_profile(sub, claims):
     user["username"] = _get_cognito_username(claims)
     user["email"] = claims.get("email")
     user["phone_number"] = claims.get("phone_number")
+    user["role"] = user.get("role") or "customer"
 
     return user
 
@@ -56,3 +57,18 @@ def update_user_profile(sub, data):
         data.get("age"),
         profile_image_url,
     )
+
+
+def promote_user(actor_sub, target_cognito_sub, role):
+    actor = user_repository.get_user_by_sub(actor_sub)
+    if not actor or actor.get("role") != "admin":
+        raise PermissionError("Admin access required")
+
+    if role not in {"customer", "admin"}:
+        raise ValueError("Invalid role")
+
+    updated_rows = user_repository.update_user_role_by_sub(target_cognito_sub, role)
+    if not updated_rows:
+        return {"message": "user not found"}
+
+    return {"message": "updated", "role": role}

@@ -3,7 +3,7 @@
 from fastapi import APIRouter, Request, HTTPException
 from app.common.auth import get_current_user_sub, get_claims
 from app.services import profile_image_service, user_service
-from app.models.user_models import CreateProfileImageUploadRequest, UpdateUserRequest
+from app.models.user_models import CreateProfileImageUploadRequest, PromoteUserRequest, UpdateUserRequest
 
 router = APIRouter()
 
@@ -55,3 +55,15 @@ def create_profile_image_upload(request: Request, body: CreateProfileImageUpload
         body.fileName,
         body.contentType,
     )
+
+
+@router.post("/admin/promote")
+def promote_user(request: Request, body: PromoteUserRequest):
+    sub = get_current_user_sub(request)
+
+    try:
+        return user_service.promote_user(sub, body.cognitoSub, body.role)
+    except PermissionError as error:
+        raise HTTPException(status_code=403, detail=str(error))
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error))

@@ -51,3 +51,20 @@ def update_user(sub, bio, address, age, profile_image_url):
 
     conn.commit()
     return updated_rows
+
+
+def update_user_role_by_sub(cognito_sub, role):
+    conn = get_db_connection()
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE users
+            SET role = %s
+            WHERE cognito_sub = %s
+        """,
+            (role, cognito_sub),
+        )
+        updated_rows = cur.rowcount
+
+    conn.commit()
+    return updated_rows

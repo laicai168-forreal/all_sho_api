@@ -12,6 +12,11 @@ class UpdateUserRequest(BaseModel):
     pendingProfileImageKey: Optional[str] = None
 
 
+class PromoteUserRequest(BaseModel):
+    cognitoSub: str
+    role: str
+
+
 class CreateProfileImageUploadRequest(BaseModel):
     fileName: str
     contentType: str
