@@ -9,7 +9,6 @@ import { ImageResizeCfnConstruct } from './contructs/cloudFront/ImageResizeCfnCo
 import { CarsDynamoConstruct } from './contructs/dynamos/CarsDynamoConstruct';
 import { LikeCollectionDynamoConstruct } from './contructs/dynamos/LikeCollectionDynamoConstruct';
 import { UserCollectionDynamoConstruct } from './contructs/dynamos/UserCollectionDynamoConstruct';
-import { CarApi } from './contructs/lambdas/cars/CarsApiConstruct';
 import { AddCollectionConstruct } from './contructs/lambdas/collections/AddCollectionConstruct';
 import { DeleteCollectionConstruct } from './contructs/lambdas/collections/DeleteCollectionConstruct';
 import { DislikeCollectionConstruct } from './contructs/lambdas/collections/DislikeCollectionConstruct';
@@ -86,19 +85,6 @@ export class LaicaiApiStack extends cdk.Stack {
 		// Image stack
 		const imageResizeLambda = new ImagesResizingLambdaConstruct(this, 'ImageResizingLambda', { imageBucket: crawlerBucket.bucket, oldBucket: crawlerBucket.oldBucket });
 		new ImageResizeCfnConstruct(this, 'ImageResizeCfn', { imageResizeFunctionUrl: imageResizeLambda.functionUrl.url });
-
-		///////////////////////////////////////////////////////////////
-		// Car stack
-		new CarApi(
-			this,
-			'CarApiConstruct',
-			{
-				userCollectionTable: userItemTable.table,
-				likeCollectionTable: likeItemTable.table,
-				secret: dbSecret,
-				vpc: carsVpc,
-				rds: carRDSInstance
-			});
 
 		///////////////////////////////////////////////////////////////
 		// Http stack

@@ -2,7 +2,7 @@
 
 from uuid import UUID
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 
 from app.common.auth import get_current_user_sub
 from app.models.car_models import (
@@ -15,6 +15,39 @@ from app.models.car_models import (
 from app.services import car_service
 
 router = APIRouter()
+
+
+@router.get("/cars")
+def get_cars(
+    request: Request,
+    cid: UUID | None = None,
+    ownersOnly: bool = Query(False),
+    limit: int = 20,
+    offset: int = 0,
+    bid: str | None = None,
+    keyword: str | None = None,
+):
+    # This route intentionally multiplexes the old public car-read surface:
+    # list, single detail, and owner pagination all share the same `/cars`
+    # entrypoint so the frontend could migrate off the legacy Lambda without
+    # changing its read URLs.
+    sub = get_current_user_sub(request)
+
+    if ownersOnly:
+        if not cid:
+            raise HTTPException(status_code=400, detail="cid is required for owners lookup")
+        return car_service.list_public_car_owners(str(cid), limit=limit, offset=offset)
+
+    if cid:
+        return car_service.get_public_car_detail(sub, str(cid))
+
+    return car_service.list_public_cars(
+        sub=sub,
+        bid=bid,
+        keyword=keyword,
+        limit=limit,
+        offset=offset,
+    )
 
 
 @router.post("/admin/cars")

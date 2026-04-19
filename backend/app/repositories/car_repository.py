@@ -33,6 +33,24 @@ ALLOWED_CAR_FIELDS = {
 }
 
 JSONB_FIELDS = {"additional_info", "images"}
+# Shared aggregate CTE for public car reads so list/detail stay consistent on
+# owners_count and likes_count without duplicating the counting logic.
+CAR_STATS_CTE = """
+WITH car_stats AS (
+    SELECT
+        car_id,
+        COUNT(DISTINCT user_id) AS owners_count
+    FROM user_collection_items
+    GROUP BY car_id
+),
+like_stats AS (
+    SELECT
+        car_id,
+        COUNT(*) AS likes_count
+    FROM user_liked_items
+    GROUP BY car_id
+)
+"""
 
 
 def _sanitize_car_payload(payload):
@@ -157,6 +175,219 @@ def get_car_by_id(car_id):
             (car_id,),
         )
         return cur.fetchone()
+
+
+def get_public_car_detail(car_id, user_id=None):
+    # Mirrors the legacy public car-detail response shape, including optional
+    # own/liked flags and a small owners preview for the car detail page.
+    conn = get_db_connection()
+    user_join = ""
+    params = []
+
+    if user_id:
+        own_expr = """
+        EXISTS (
+          SELECT 1
+          FROM user_collection_items uci
+          WHERE uci.car_id = c.id AND uci.user_id = %s
+        )
+        """
+        params.append(user_id)
+    else:
+        own_expr = "false"
+
+    if user_id:
+        liked_expr = "(uli.user_id IS NOT NULL)"
+        user_join = """
+        LEFT JOIN user_liked_items uli
+          ON uli.car_id = c.id AND uli.user_id = %s
+        """
+        params.append(user_id)
+    else:
+        liked_expr = "false"
+        user_join = "LEFT JOIN user_liked_items uli ON false"
+
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute(
+            f"""
+            {CAR_STATS_CTE}
+            SELECT
+                c.id,
+                c.original_id,
+                c.title,
+                b.name AS brand,
+                m.name AS make,
+                c.make_ai,
+                pl.name AS product_line,
+                c.model_ai,
+                c.scale,
+                c.release_date_ai,
+                c.release_date_approximate,
+                c.source_url,
+                c.crawled_date,
+                c.image_url,
+                c.images,
+                c.additional_info,
+                {own_expr} AS own,
+                {liked_expr} AS liked,
+                COALESCE(cs.owners_count, 0) AS owners_count,
+                COALESCE(ls.likes_count, 0) AS likes_count
+            FROM cars c
+            LEFT JOIN brands b ON b.id = c.brand_id
+            LEFT JOIN makes m ON m.id = c.make_id
+            LEFT JOIN product_lines pl ON pl.id = c.product_line_id
+            {user_join}
+            LEFT JOIN car_stats cs ON cs.car_id = c.id
+            LEFT JOIN like_stats ls ON ls.car_id = c.id
+            WHERE c.id = %s
+            """,
+            params + [car_id],
+        )
+        item = cur.fetchone()
+        if item:
+            item["owners_preview"] = list_car_owners(car_id, limit=5, offset=0)["items"]
+        return item
+
+
+def list_public_cars(filters=None, values=None, user_id=None, limit=20, offset=0):
+    # Public car list query used by the main cars page and admin maintenance
+    # list. Keep this shape aligned with the previous Lambda response so the
+    # frontend migration stays low-risk.
+    conn = get_db_connection()
+    filters = filters or []
+    values = values or []
+    join_params = []
+
+    if user_id:
+        own_expr = """
+        EXISTS (
+          SELECT 1
+          FROM user_collection_items uci
+          WHERE uci.car_id = c.id AND uci.user_id = %s
+        )
+        """
+        join_params.append(user_id)
+    else:
+        own_expr = "false"
+
+    if user_id:
+        liked_expr = "(uli.user_id IS NOT NULL)"
+        user_join = """
+        LEFT JOIN user_liked_items uli
+          ON uli.car_id = c.id AND uli.user_id = %s
+        """
+        join_params.append(user_id)
+    else:
+        liked_expr = "false"
+        user_join = "LEFT JOIN user_liked_items uli ON false"
+
+    where_clause = f"WHERE {' AND '.join(filters)}" if filters else ""
+
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute(
+            f"""
+            {CAR_STATS_CTE}
+            SELECT
+                c.id,
+                c.title,
+                b.name AS brand,
+                m.name AS make,
+                c.make_ai,
+                pl.name AS product_line,
+                c.model_ai,
+                c.scale,
+                c.release_date_ai,
+                c.release_date_approximate,
+                c.source_url,
+                c.crawled_date,
+                c.images,
+                {own_expr} AS own,
+                {liked_expr} AS liked,
+                COALESCE(cs.owners_count, 0) AS owners_count,
+                COALESCE(ls.likes_count, 0) AS likes_count
+            FROM cars c
+            LEFT JOIN brands b ON b.id = c.brand_id
+            LEFT JOIN makes m ON m.id = c.make_id
+            LEFT JOIN product_lines pl ON pl.id = c.product_line_id
+            {user_join}
+            LEFT JOIN car_stats cs ON cs.car_id = c.id
+            LEFT JOIN like_stats ls ON ls.car_id = c.id
+            {where_clause}
+            ORDER BY c.crawled_date DESC
+            LIMIT %s OFFSET %s
+            """,
+            join_params + values + [limit, offset],
+        )
+        items = cur.fetchall()
+
+        cur.execute(
+            f"""
+            SELECT COUNT(*) AS count
+            FROM cars c
+            LEFT JOIN brands b ON b.id = c.brand_id
+            {where_clause}
+            """,
+            values,
+        )
+        total = cur.fetchone()["count"]
+
+    return {
+        "items": items,
+        "total": total,
+        "pages": (total + limit - 1) // limit,
+    }
+
+
+def list_car_owners(car_id, limit=20, offset=0):
+    # Return one row per owner, ordered by their most recent add date for this
+    # car. The window count lets the UI paginate without a second count query.
+    conn = get_db_connection()
+
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute(
+            """
+            WITH owner_rows AS (
+                SELECT
+                    u.id,
+                    u.username,
+                    u.profile_image_url,
+                    MAX(uci.created_at) AS latest_owned_at
+                FROM user_collection_items uci
+                JOIN users u ON u.id = uci.user_id
+                WHERE uci.car_id = %s
+                GROUP BY u.id, u.username, u.profile_image_url
+            )
+            SELECT
+                id,
+                username,
+                profile_image_url,
+                latest_owned_at,
+                COUNT(*) OVER() AS total_count
+            FROM owner_rows
+            ORDER BY latest_owned_at DESC NULLS LAST, username ASC
+            LIMIT %s OFFSET %s
+            """,
+            (car_id, limit, offset),
+        )
+        rows = cur.fetchall()
+
+    total = rows[0]["total_count"] if rows else 0
+    items = [
+        {
+            "id": row["id"],
+            "username": row["username"],
+            "profile_image_url": row["profile_image_url"],
+            "latest_owned_at": row["latest_owned_at"],
+        }
+        for row in rows
+    ]
+
+    return {
+        "items": items,
+        "total": int(total or 0),
+        "limit": limit,
+        "offset": offset,
+    }
 
 
 def list_brands():

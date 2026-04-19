@@ -91,6 +91,13 @@ export class UserFastApiConstruct extends Construct {
         });
 
         httpApi.addRoutes({
+            path: "/cars",
+            methods: [apigwv2.HttpMethod.GET],
+            integration,
+            authorizer,
+        });
+
+        httpApi.addRoutes({
             path: "/car-change-requests/{proxy+}",
             methods: [apigwv2.HttpMethod.GET, apigwv2.HttpMethod.POST],
             integration,

@@ -19,6 +19,12 @@ cors_headers = {
 }
 
 
+def parse_bool(value):
+    if value is None:
+        return False
+    return str(value).lower() in {"1", "true", "yes", "on"}
+
+
 def get_conn():
     secret = json.loads(
         secrets_client.get_secret_value(SecretId=SECRET_ARN)["SecretString"]
@@ -135,7 +141,56 @@ def fetch_car_detail(cur, car_id, user_id=None):
 
     params.append(car_id)
     cur.execute(sql, params)
-    return cur.fetchone()
+    item = cur.fetchone()
+    if item:
+        item["owners_preview"] = fetch_car_owners(cur, car_id, limit=5, offset=0)["items"]
+    return item
+
+
+def fetch_car_owners(cur, car_id, limit=20, offset=0):
+    sql = """
+    WITH owner_rows AS (
+        SELECT
+            u.id,
+            u.username,
+            u.profile_image_url,
+            MAX(uci.created_at) AS latest_owned_at
+        FROM user_collection_items uci
+        JOIN users u ON u.id = uci.user_id
+        WHERE uci.car_id = %s
+        GROUP BY u.id, u.username, u.profile_image_url
+    )
+    SELECT
+        id,
+        username,
+        profile_image_url,
+        latest_owned_at,
+        COUNT(*) OVER() AS total_count
+    FROM owner_rows
+    ORDER BY latest_owned_at DESC NULLS LAST, username ASC
+    LIMIT %s OFFSET %s
+    """
+
+    cur.execute(sql, (car_id, limit, offset))
+    rows = cur.fetchall()
+    total = rows[0]["total_count"] if rows else 0
+
+    items = [
+        {
+            "id": row["id"],
+            "username": row["username"],
+            "profile_image_url": row["profile_image_url"],
+            "latest_owned_at": row["latest_owned_at"],
+        }
+        for row in rows
+    ]
+
+    return {
+        "items": items,
+        "total": int(total or 0),
+        "limit": limit,
+        "offset": offset,
+    }
 
 
 # ---------------------------------------------------
@@ -236,12 +291,27 @@ def handler(event, context):
 
         user_id = parse_uuid(params.get("userId"), "userId")
         cid = parse_uuid(params.get("cid"), "cid")
+        owners_only = parse_bool(params.get("ownersOnly"))
 
         limit = int(params.get("limit", 20))
         offset = int(params.get("offset", 0))
 
         conn = get_conn()
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            if owners_only:
+                if not cid:
+                    return {
+                        "statusCode": 400,
+                        "headers": cors_headers,
+                        "body": json.dumps({"message": "cid is required for owners lookup"}),
+                    }
+
+                owners = fetch_car_owners(cur, cid, limit=limit, offset=offset)
+                return {
+                    "statusCode": 200,
+                    "headers": cors_headers,
+                    "body": json.dumps(owners, default=str),
+                }
 
             # ---- Single car
             if cid:

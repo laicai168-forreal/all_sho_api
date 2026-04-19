@@ -16,11 +16,63 @@ def _get_user_by_sub_or_401(sub):
     return user
 
 
+def _get_user_by_sub_or_none(sub):
+    # Public car reads should still work for local/dev contexts or any future
+    # unauthenticated usage. When a user is available we enrich the response
+    # with own/liked flags, otherwise those fields fall back to false.
+    if not sub:
+        return None
+    return user_repository.get_user_by_sub(sub)
+
+
 def require_admin(sub):
     user = _get_user_by_sub_or_401(sub)
     if user.get("role") != "admin":
         raise HTTPException(status_code=403, detail="Admin access required")
     return user
+
+
+def list_public_cars(sub, bid=None, keyword=None, limit=20, offset=0):
+    # Preserve the legacy `/cars` list contract while moving execution into the
+    # FastAPI stack. The response still includes brand metadata because the
+    # cars page depends on it for filter dropdowns.
+    user = _get_user_by_sub_or_none(sub)
+    filters = []
+    values = []
+
+    if bid:
+        filters.append("b.id = %s")
+        values.append(bid)
+
+    if keyword:
+        filters.append("c.search_vector @@ plainto_tsquery(%s)")
+        values.append(keyword)
+
+    result = car_repository.list_public_cars(
+        filters=filters,
+        values=values,
+        user_id=user["id"] if user else None,
+        limit=limit,
+        offset=offset,
+    )
+    result["brands"] = car_repository.list_brands()
+    return result
+
+
+def get_public_car_detail(sub, car_id):
+    # Single-car reads share the same user-aware enrichment as the list path so
+    # detail pages keep own/liked state without a second API.
+    user = _get_user_by_sub_or_none(sub)
+    item = car_repository.get_public_car_detail(car_id, user["id"] if user else None)
+    if not item:
+        raise HTTPException(status_code=404, detail="Car not found")
+    return item
+
+
+def list_public_car_owners(car_id, limit=20, offset=0):
+    # Owner pagination is kept separate from the main detail payload so the
+    # preview can stay lightweight while expanded lists paginate on demand.
+    return car_repository.list_car_owners(car_id, limit=limit, offset=offset)
 
 
 def _normalize_lookup_name(value):
