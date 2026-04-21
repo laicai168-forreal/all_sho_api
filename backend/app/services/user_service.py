@@ -72,3 +72,39 @@ def promote_user(actor_sub, target_cognito_sub, role):
         return {"message": "user not found"}
 
     return {"message": "updated", "role": role}
+
+
+def list_users(actor_sub, keyword=None, limit=50, offset=0):
+    actor = user_repository.get_user_by_sub(actor_sub)
+    if not actor or actor.get("role") != "admin":
+        raise PermissionError("Admin access required")
+
+    result = user_repository.list_users(keyword=keyword, limit=limit, offset=offset)
+    for item in result["items"]:
+        item["role"] = item.get("role") or "customer"
+    return result
+
+
+def delete_user(actor_sub, target_user_id):
+    actor = user_repository.get_user_by_sub(actor_sub)
+    if not actor or actor.get("role") != "admin":
+        raise PermissionError("Admin access required")
+
+    target_user = user_repository.get_user_by_id(target_user_id)
+    if not target_user:
+        return {"message": "user not found"}
+
+    if actor.get("id") == target_user.get("id"):
+        raise ValueError("You cannot delete your own admin account from this page")
+
+    # This admin tool performs a hard delete only when the target user is not
+    # referenced by tables with restrictive foreign keys. If the row is blocked
+    # by references, we surface a friendly error instead of silently nulling or
+    # cascading related data that the schema treats as required.
+    result = user_repository.delete_user_by_id(target_user_id)
+    if result.get("blocked_by_reference"):
+        raise ValueError("User cannot be deleted because related records still reference this account")
+    if not result.get("deleted_rows"):
+        return {"message": "user not found"}
+
+    return {"message": "deleted"}

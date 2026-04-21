@@ -67,7 +67,7 @@ export class UserFastApiConstruct extends Construct {
         // Proxy route for /users/me and future nested endpoints
         httpApi.addRoutes({
             path: "/users/{proxy+}",
-            methods: [apigwv2.HttpMethod.GET, apigwv2.HttpMethod.POST],
+            methods: [apigwv2.HttpMethod.GET, apigwv2.HttpMethod.POST, apigwv2.HttpMethod.DELETE],
             integration,
             authorizer,
         });

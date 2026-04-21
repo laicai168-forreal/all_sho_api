@@ -1,6 +1,7 @@
 # app/routes/users.py
 
 from fastapi import APIRouter, Request, HTTPException
+from uuid import UUID
 from app.common.auth import get_current_user_sub, get_claims
 from app.services import profile_image_service, user_service
 from app.models.user_models import CreateProfileImageUploadRequest, PromoteUserRequest, UpdateUserRequest
@@ -67,3 +68,32 @@ def promote_user(request: Request, body: PromoteUserRequest):
         raise HTTPException(status_code=403, detail=str(error))
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error))
+
+
+@router.get("/admin/list")
+def list_users(
+    request: Request,
+    keyword: str | None = None,
+    limit: int = 50,
+    offset: int = 0,
+):
+    sub = get_current_user_sub(request)
+
+    try:
+        return user_service.list_users(sub, keyword=keyword, limit=limit, offset=offset)
+    except PermissionError as error:
+        raise HTTPException(status_code=403, detail=str(error))
+
+
+@router.delete("/admin/{user_id}")
+def delete_user(request: Request, user_id: UUID):
+    sub = get_current_user_sub(request)
+
+    try:
+        # UUID typing prevents static admin paths from being accidentally
+        # swallowed by this dynamic segment in future route additions.
+        return user_service.delete_user(sub, str(user_id))
+    except PermissionError as error:
+        raise HTTPException(status_code=403, detail=str(error))
+    except ValueError as error:
+        raise HTTPException(status_code=409, detail=str(error))
