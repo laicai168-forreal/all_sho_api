@@ -73,6 +73,18 @@ export class UserFastApiConstruct extends Construct {
         });
 
         httpApi.addRoutes({
+            path: "/profiles/{user_id}",
+            methods: [apigwv2.HttpMethod.GET],
+            integration,
+        });
+
+        httpApi.addRoutes({
+            path: "/profiles/{user_id}/{proxy+}",
+            methods: [apigwv2.HttpMethod.GET],
+            integration,
+        });
+
+        httpApi.addRoutes({
             path: "/admin/{proxy+}",
             methods: [
                 apigwv2.HttpMethod.GET,

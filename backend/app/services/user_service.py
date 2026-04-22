@@ -108,3 +108,81 @@ def delete_user(actor_sub, target_user_id):
         return {"message": "user not found"}
 
     return {"message": "deleted"}
+
+
+def get_public_profile(target_user_id, limit=12, offset=0):
+    return user_repository.get_public_profile(target_user_id, limit=limit, offset=offset)
+
+
+def get_follow_status(actor_sub, target_user_id):
+    actor = user_repository.get_user_by_sub(actor_sub)
+    if not actor:
+        raise ValueError("Viewer not found")
+
+    target_user = user_repository.get_user_by_id(target_user_id)
+    if not target_user:
+        raise ValueError("User not found")
+
+    return user_repository.get_follow_status(actor["id"], target_user_id)
+
+
+def follow_user(actor_sub, target_user_id):
+    actor = user_repository.get_user_by_sub(actor_sub)
+    if not actor:
+        raise ValueError("Viewer not found")
+
+    target_user = user_repository.get_user_by_id(target_user_id)
+    if not target_user:
+        raise ValueError("User not found")
+
+    if actor["id"] == target_user_id:
+        raise ValueError("You cannot follow yourself")
+
+    user_repository.follow_user(actor["id"], target_user_id)
+    return user_repository.get_follow_status(actor["id"], target_user_id)
+
+
+def unfollow_user(actor_sub, target_user_id):
+    actor = user_repository.get_user_by_sub(actor_sub)
+    if not actor:
+        raise ValueError("Viewer not found")
+
+    target_user = user_repository.get_user_by_id(target_user_id)
+    if not target_user:
+        raise ValueError("User not found")
+
+    if actor["id"] == target_user_id:
+        raise ValueError("You cannot unfollow yourself")
+
+    user_repository.unfollow_user(actor["id"], target_user_id)
+    return user_repository.get_follow_status(actor["id"], target_user_id)
+
+
+def get_public_followers(target_user_id, limit=20, offset=0):
+    target_user = user_repository.get_user_by_id(target_user_id)
+    if not target_user:
+        return None
+    return user_repository.list_followers(target_user_id, limit=limit, offset=offset)
+
+
+def get_public_following(target_user_id, limit=20, offset=0):
+    target_user = user_repository.get_user_by_id(target_user_id)
+    if not target_user:
+        return None
+    return user_repository.list_following(target_user_id, limit=limit, offset=offset)
+
+
+def remove_follower(actor_sub, follower_user_id):
+    actor = user_repository.get_user_by_sub(actor_sub)
+    if not actor:
+        raise ValueError("Viewer not found")
+
+    follower_user = user_repository.get_user_by_id(follower_user_id)
+    if not follower_user:
+        raise ValueError("User not found")
+
+    if actor["id"] == follower_user_id:
+        raise ValueError("You cannot remove yourself as a follower")
+
+    user_repository.remove_follower(actor["id"], follower_user_id)
+    return {"message": "removed"}

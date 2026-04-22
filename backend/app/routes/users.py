@@ -7,6 +7,7 @@ from app.services import profile_image_service, user_service
 from app.models.user_models import CreateProfileImageUploadRequest, PromoteUserRequest, UpdateUserRequest
 
 router = APIRouter()
+public_router = APIRouter()
 
 
 @router.post("")
@@ -97,3 +98,81 @@ def delete_user(request: Request, user_id: UUID):
         raise HTTPException(status_code=403, detail=str(error))
     except ValueError as error:
         raise HTTPException(status_code=409, detail=str(error))
+
+
+@public_router.get("/profiles/{user_id}")
+def get_public_profile(
+    user_id: UUID,
+    limit: int = 12,
+    offset: int = 0,
+):
+    # Public collector page stays separate from `/users/...` so visitors can
+    # browse profiles without hitting the authenticated user router.
+    profile = user_service.get_public_profile(str(user_id), limit=limit, offset=offset)
+    if not profile:
+        raise HTTPException(status_code=404, detail="User not found")
+    return profile
+
+
+@public_router.get("/profiles/{user_id}/followers")
+def get_public_followers(
+    user_id: UUID,
+    limit: int = 20,
+    offset: int = 0,
+):
+    result = user_service.get_public_followers(str(user_id), limit=limit, offset=offset)
+    if result is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    return result
+
+
+@public_router.get("/profiles/{user_id}/following")
+def get_public_following(
+    user_id: UUID,
+    limit: int = 20,
+    offset: int = 0,
+):
+    result = user_service.get_public_following(str(user_id), limit=limit, offset=offset)
+    if result is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    return result
+
+
+@router.get("/follows/{user_id}")
+def get_follow_status(request: Request, user_id: UUID):
+    sub = get_current_user_sub(request)
+
+    try:
+        return user_service.get_follow_status(sub, str(user_id))
+    except ValueError as error:
+        raise HTTPException(status_code=404, detail=str(error))
+
+
+@router.post("/follows/{user_id}")
+def follow_user(request: Request, user_id: UUID):
+    sub = get_current_user_sub(request)
+
+    try:
+        return user_service.follow_user(sub, str(user_id))
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error))
+
+
+@router.delete("/follows/{user_id}")
+def unfollow_user(request: Request, user_id: UUID):
+    sub = get_current_user_sub(request)
+
+    try:
+        return user_service.unfollow_user(sub, str(user_id))
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error))
+
+
+@router.delete("/followers/{user_id}")
+def remove_follower(request: Request, user_id: UUID):
+    sub = get_current_user_sub(request)
+
+    try:
+        return user_service.remove_follower(sub, str(user_id))
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error))

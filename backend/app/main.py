@@ -13,4 +13,5 @@ app.add_middleware(
 )
 
 app.include_router(users.router, prefix="/users", tags=["Users"])
+app.include_router(users.public_router, tags=["Public Profiles"])
 app.include_router(cars.router, tags=["Cars"])

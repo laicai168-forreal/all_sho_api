@@ -9,10 +9,11 @@ from app.models.car_models import (
     CarChangeRequestCreate,
     CarChangeRequestReview,
     CarChangeRequestUpdate,
+    CreateCarChangeRequestImageUploadRequest,
     CarMutationRequest,
     CarDuplicateRequest,
 )
-from app.services import car_service
+from app.services import car_service, profile_image_service
 
 router = APIRouter()
 
@@ -113,6 +114,16 @@ def review_admin_change_request(request: Request, request_id: UUID, body: CarCha
 def submit_change_request(request: Request, body: CarChangeRequestCreate):
     sub = get_current_user_sub(request)
     return car_service.submit_change_request(sub, body.dict(exclude_none=True))
+
+
+@router.post("/car-change-requests/images/upload")
+def create_change_request_image_upload(request: Request, body: CreateCarChangeRequestImageUploadRequest):
+    sub = get_current_user_sub(request)
+    return profile_image_service.create_car_change_request_image_upload(
+        sub,
+        body.fileName,
+        body.contentType,
+    )
 
 
 @router.get("/car-change-requests")

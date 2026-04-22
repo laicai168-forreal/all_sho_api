@@ -177,6 +177,34 @@ def get_car_by_id(car_id):
         return cur.fetchone()
 
 
+def car_image_is_used_elsewhere(car_id, image_url):
+    conn = get_db_connection()
+
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT EXISTS (
+                SELECT 1
+                FROM cars c
+                CROSS JOIN LATERAL jsonb_array_elements(
+                    CASE
+                        WHEN jsonb_typeof(c.images) = 'array' THEN c.images
+                        ELSE '[]'::jsonb
+                    END
+                ) AS image
+                WHERE c.id <> %s
+                  AND (
+                    image->>'s3_url' = %s
+                    OR image->>'original_url' = %s
+                  )
+            )
+            """,
+            (car_id, image_url, image_url),
+        )
+        row = cur.fetchone()
+        return bool(row and row[0])
+
+
 def get_public_car_detail(car_id, user_id=None):
     # Mirrors the legacy public car-detail response shape, including optional
     # own/liked flags and a small owners preview for the car detail page.

@@ -48,3 +48,8 @@ class CarChangeRequestUpdate(BaseModel):
     request_type: Optional[str] = None
     payload: Optional[dict[str, Any]] = None
     uploaded_images: Optional[list[dict[str, Any]]] = None
+
+
+class CreateCarChangeRequestImageUploadRequest(BaseModel):
+    fileName: str
+    contentType: str

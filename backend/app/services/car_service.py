@@ -5,8 +5,10 @@ import uuid
 from fastapi import HTTPException
 
 from app.repositories import car_repository, user_repository
+from app.services import profile_image_service
 
 WEEKLY_CHANGE_REQUEST_LIMIT = 5
+CASE_INSENSITIVE_SUGGESTION_FIELDS = {"brand", "make", "product_line"}
 
 
 def _get_user_by_sub_or_401(sub):
@@ -80,6 +82,51 @@ def _normalize_lookup_name(value):
         return None
     trimmed = value.strip()
     return trimmed or None
+
+
+def _normalize_comparable_payload(payload):
+    normalized = dict(payload or {})
+    for field in CASE_INSENSITIVE_SUGGESTION_FIELDS:
+        if field in normalized and isinstance(normalized[field], str):
+            normalized[field] = normalized[field].strip()
+    return normalized
+
+
+def _merge_uploaded_images_into_payload(payload, uploaded_images):
+    if not uploaded_images:
+        return payload
+
+    merged = dict(payload or {})
+    current_images = list(merged.get("images") or [])
+    existing_urls = {
+        (image.get("s3_url") or image.get("original_url"))
+        for image in current_images
+        if isinstance(image, dict)
+    }
+
+    for image in uploaded_images:
+        file_url = image.get("file_url") or image.get("fileUrl")
+        if not file_url or file_url in existing_urls:
+            continue
+
+        # Approved customer uploads should be promoted into the canonical
+        # `images/` S3 namespace so they behave exactly like crawler-stored car
+        # images and remain compatible with the existing CloudFront image path.
+        if "/car-change-requests/" in file_url:
+            file_url = profile_image_service.promote_car_change_request_image(file_url)
+            if file_url in existing_urls:
+                continue
+
+        current_images.append({
+            "s3_url": file_url,
+            "original_url": file_url,
+        })
+        existing_urls.add(file_url)
+
+    if current_images:
+        merged["images"] = current_images
+
+    return merged
 
 
 def _resolve_brand(payload):
@@ -156,9 +203,36 @@ def create_admin_car(sub, payload):
 
 def update_admin_car(sub, car_id, payload):
     user = require_admin(sub)
-    updated = car_repository.update_car(car_id, _resolve_admin_car_payload(payload), user["id"])
+    current_car = car_repository.get_car_by_id(car_id)
+    if not current_car:
+        raise HTTPException(status_code=404, detail="Car not found")
+
+    resolved_payload = _resolve_admin_car_payload(payload)
+    updated = car_repository.update_car(car_id, resolved_payload, user["id"])
     if not updated:
         raise HTTPException(status_code=404, detail="Car not found")
+
+    previous_urls = {
+        (image.get("s3_url") or image.get("original_url"))
+        for image in (current_car.get("images") or [])
+        if isinstance(image, dict)
+    }
+    next_urls = {
+        (image.get("s3_url") or image.get("original_url"))
+        for image in (resolved_payload.get("images") or [])
+        if isinstance(image, dict)
+    }
+
+    # Admin image removal happens by editing the `images` array directly in the
+    # form. After the row update succeeds, delete any orphaned canonical car
+    # images that are no longer referenced by this car or any other car.
+    for removed_url in previous_urls - next_urls:
+        if not removed_url:
+            continue
+        if car_repository.car_image_is_used_elsewhere(car_id, removed_url):
+            continue
+        profile_image_service.delete_canonical_car_image(removed_url)
+
     return updated
 
 
@@ -199,6 +273,8 @@ def submit_change_request(sub, body):
     payload = body.copy()
     if payload.get("car_id"):
         payload["car_id"] = str(uuid.UUID(payload["car_id"]))
+    if payload.get("payload"):
+        payload["payload"] = _normalize_comparable_payload(payload["payload"])
 
     return car_repository.create_change_request(payload, user["id"])
 
@@ -237,7 +313,11 @@ def update_user_change_request(sub, request_id, body):
     if existing["status"] != "pending":
         raise HTTPException(status_code=409, detail="Only pending requests can be updated")
 
-    updated = car_repository.update_change_request(request_id, body)
+    update_payload = body.copy()
+    if update_payload.get("payload"):
+        update_payload["payload"] = _normalize_comparable_payload(update_payload["payload"])
+
+    updated = car_repository.update_change_request(request_id, update_payload)
     return {
         "request": updated,
         "currentCar": car_repository.get_car_by_id(updated["car_id"]) if updated.get("car_id") else None,
@@ -305,6 +385,10 @@ def review_admin_change_request(sub, request_id, status, review_notes, final_pay
             **(existing.get("payload") or {}),
             **(final_payload or {}),
         }
+        merged_payload = _merge_uploaded_images_into_payload(
+            merged_payload,
+            existing.get("uploaded_images") or [],
+        )
 
         if existing.get("car_id"):
             applied_car = car_repository.update_car(
