@@ -46,6 +46,10 @@ export class LaicaiApiStack extends cdk.Stack {
 		const dbSecret = carRDSInstance.secret!;
 
 		///////////////////////////////////////////////////////////////
+		// Lambda layer stack
+		const { layer: commonLayer } = new CommonLayerConstruct(this, "CommonLayer");
+
+		///////////////////////////////////////////////////////////////
 		// User collection stack
 		const userItemTable = new UserCollectionDynamoConstruct(this, 'UserItemTable');
 		const likeItemTable = new LikeCollectionDynamoConstruct(this, 'LikeItemTable');
@@ -73,12 +77,12 @@ export class LaicaiApiStack extends cdk.Stack {
 		const carsDynamo = new CarsDynamoConstruct(this, 'CrawlerDB');
 		const crawlerBucket = new CrawlerBucketConstruct(this, 'CrawlerBucket');
 		const { logsTable } = new CrawlerLoggingConstruct(this, 'CrawlerLog');
-		const { function: minigtCrawlFunction } = new CrawlerConstruct(this, 'Crawler', { bucket: crawlerBucket.bucket, secret: dbSecret, vpc: carsVpc, carRDSInstance, logsTable });
-		const { function: tarmacworksCrawlFunction } = new TWCrawlerConstruct(this, 'CrawlerTW', { bucket: crawlerBucket.bucket, secret: dbSecret, vpc: carsVpc, carRDSInstance, logsTable });
-		const { function: innoCrawlFunction } = new InnoCrawlerConstruct(this, 'CrawlerInno', { bucket: crawlerBucket.bucket, secret: dbSecret, vpc: carsVpc, carRDSInstance, logsTable });
-		const { function: popraceCrawlerFunction } = new PopRaceCrawlerConstruct(this, 'CrawlerPoprace', { bucket: crawlerBucket.bucket, secret: dbSecret, vpc: carsVpc, carRDSInstance, logsTable });
+		const { function: minigtCrawlFunction } = new CrawlerConstruct(this, 'Crawler', { bucket: crawlerBucket.bucket, secret: dbSecret, vpc: carsVpc, carRDSInstance, logsTable, layer: commonLayer });
+		const { function: tarmacworksCrawlFunction } = new TWCrawlerConstruct(this, 'CrawlerTW', { bucket: crawlerBucket.bucket, secret: dbSecret, vpc: carsVpc, carRDSInstance, logsTable, layer: commonLayer });
+		const { function: innoCrawlFunction } = new InnoCrawlerConstruct(this, 'CrawlerInno', { bucket: crawlerBucket.bucket, secret: dbSecret, vpc: carsVpc, carRDSInstance, logsTable, layer: commonLayer });
+		const { function: popraceCrawlerFunction } = new PopRaceCrawlerConstruct(this, 'CrawlerPoprace', { bucket: crawlerBucket.bucket, secret: dbSecret, vpc: carsVpc, carRDSInstance, logsTable, layer: commonLayer });
 		new CrawlerHelperApiConstruct(this, 'CrawlerHelperApi', { minigtCrawlFunction, tarmacworksCrawlFunction, innoCrawlFunction, popraceCrawlerFunction });
-		const { function: addtionalDataFunction } = new AddtionalCarDataPopulatorConstruct(this, 'AddtionalCarDataPopulator', { bucket: crawlerBucket.bucket, secret: dbSecret, vpc: carsVpc, carRDSInstance, logsTable });
+		const { function: addtionalDataFunction } = new AddtionalCarDataPopulatorConstruct(this, 'AddtionalCarDataPopulator', { bucket: crawlerBucket.bucket, secret: dbSecret, vpc: carsVpc, carRDSInstance, logsTable, layer: commonLayer });
 		new AdditionalDataHelperApiConstruct(this, 'AddtionalDataHelperApi', { addtionalDataFunction });
 
 		///////////////////////////////////////////////////////////////
@@ -102,10 +106,6 @@ export class LaicaiApiStack extends cdk.Stack {
 			value: httpApiConstruct.httpApi.url || "Found URL for http api",
 			exportName: "UserCollectionsHttpApiUrl",
 		});
-
-		/////////////////////////////////////////////////////////////
-		// Lambda layer stack
-		const { layer: commonLayer } = new CommonLayerConstruct(this, "CommonLayer");
 
 		// User constructs
 		const profileImageBucket = new ProfileImageBucketConstruct(this, 'ProfileImageBucket');

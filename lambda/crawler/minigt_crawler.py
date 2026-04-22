@@ -2,7 +2,6 @@ import boto3
 import botocore
 import requests
 from io import BytesIO
-from PIL import Image
 from bs4 import BeautifulSoup
 import time
 import hashlib

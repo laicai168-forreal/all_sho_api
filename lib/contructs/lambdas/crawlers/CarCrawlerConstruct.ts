@@ -3,7 +3,6 @@ import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
 import { Duration } from 'aws-cdk-lib';
 import { IBucket } from 'aws-cdk-lib/aws-s3';
-import path from 'path';
 import { ISecret } from 'aws-cdk-lib/aws-secretsmanager';
 import { IVpc } from 'aws-cdk-lib/aws-ec2';
 import { IDatabaseInstance } from 'aws-cdk-lib/aws-rds';
@@ -15,6 +14,7 @@ export interface CrawlerConstructProps {
     vpc: IVpc;
     carRDSInstance: IDatabaseInstance;
     logsTable: ITable;
+    layer: lambda.ILayerVersion;
 }
 
 export class CrawlerConstruct extends Construct {
@@ -23,17 +23,11 @@ export class CrawlerConstruct extends Construct {
     constructor(scope: Construct, id: string, props: CrawlerConstructProps) {
         super(scope, id);
 
-        const { bucket, secret, vpc, carRDSInstance, logsTable } = props;
+        const { bucket, secret, vpc, carRDSInstance, logsTable, layer } = props;
 
         const lambdaSG = new ec2.SecurityGroup(this, "CrawlerLambdaSG", {
             vpc,
             allowAllOutbound: true,
-        });
-
-        const crawlerDeps = new lambda.LayerVersion(this, 'CrawlerDepsLayer', {
-            code: lambda.Code.fromAsset(path.join(__dirname, '../../../../lambda-layer/lambda_layer.zip')),
-            compatibleRuntimes: [lambda.Runtime.PYTHON_3_12],
-            description: 'Crawler dependencies layer',
         });
 
         this.function = new lambda.Function(this, 'CrawlerLambda', {
@@ -52,7 +46,9 @@ export class CrawlerConstruct extends Construct {
                 LOGS_TABLE_NAME: logsTable.tableArn,
             },
             timeout: Duration.minutes(10),
-            layers: [crawlerDeps],
+            // Use the CDK-bundled Python layer so dependencies are rebuilt for
+            // the Lambda runtime instead of relying on a stale hand-zipped layer.
+            layers: [layer],
             vpc,
             vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
             securityGroups: [lambdaSG],
