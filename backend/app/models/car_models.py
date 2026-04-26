@@ -53,3 +53,15 @@ class CarChangeRequestUpdate(BaseModel):
 class CreateCarChangeRequestImageUploadRequest(BaseModel):
     fileName: str
     contentType: str
+
+
+class HotWheelsStagingReviewRequest(BaseModel):
+    reviewStatus: str
+    reviewNotes: Optional[str] = None
+
+
+class HotWheelsStagingBatchReviewRequest(BaseModel):
+    itemIds: list[str]
+    reviewStatus: str
+    reviewNotes: Optional[str] = None
+    force: Optional[bool] = False

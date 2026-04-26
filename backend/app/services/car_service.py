@@ -196,6 +196,70 @@ def _resolve_admin_car_payload(payload):
     return resolved
 
 
+def _build_hot_wheels_import_payload(staged_item, existing_car=None):
+    raw_row = staged_item.get("raw_row") or {}
+    release_years = raw_row.get("release_years") if isinstance(raw_row, dict) else None
+    series_names = raw_row.get("series_names") if isinstance(raw_row, dict) else None
+    variations = raw_row.get("variations") if isinstance(raw_row, dict) else None
+    existing_additional_info = ((existing_car or {}).get("additional_info") or {})
+
+    payload = {
+        "brand": "hotwheels",
+        "product_line": staged_item.get("series_name") or None,
+        "title": staged_item.get("title"),
+        "original_id": staged_item.get("sku"),
+        "source_url": staged_item.get("source_url"),
+        "description_ai": staged_item.get("notes") or None,
+        "model_ai": staged_item.get("title"),
+        "additional_info": {
+            **existing_additional_info,
+            "import_source": "hot_wheels_fandom_staging",
+            "staging_item_id": staged_item.get("id"),
+            "page_type": staged_item.get("page_type"),
+            "page_title": staged_item.get("page_title"),
+            "source_url": staged_item.get("source_url"),
+            "section_name": staged_item.get("section_name"),
+            "release_years": release_years or ([staged_item["release_year"]] if staged_item.get("release_year") else []),
+            "series_names": series_names or ([staged_item["series_name"]] if staged_item.get("series_name") else []),
+            "variations": variations or [],
+        },
+    }
+
+    if staged_item.get("release_year"):
+        payload["release_date_approximate"] = f"{int(staged_item['release_year'])}-01-01"
+
+    if existing_car:
+        payload["images"] = existing_car.get("images")
+        payload["make"] = existing_car.get("make")
+        payload["make_ai"] = existing_car.get("make_ai")
+        payload["scale"] = existing_car.get("scale")
+    else:
+        payload["code"] = car_repository.build_hot_wheels_code(staged_item.get("sku"))
+
+    return payload
+
+
+def _import_hot_wheels_staging_item(admin_user_id, staged_item, review_notes=None):
+    existing_car = car_repository.get_car_by_brand_and_original_id("hotwheels", staged_item["sku"])
+    resolved_payload = _resolve_admin_car_payload(
+        _build_hot_wheels_import_payload(staged_item, existing_car=existing_car)
+    )
+
+    if existing_car:
+        imported_car = car_repository.update_car(existing_car["id"], resolved_payload, admin_user_id)
+    else:
+        imported_car = car_repository.create_car(resolved_payload, admin_user_id)
+
+    if not imported_car:
+        raise HTTPException(status_code=500, detail="Failed to import staged Hot Wheels row")
+
+    return car_repository.mark_hot_wheels_staging_imported(
+        staged_item["id"],
+        imported_car["id"],
+        review_notes=review_notes,
+    )
+
+
 def create_admin_car(sub, payload):
     user = require_admin(sub)
     return car_repository.create_car(_resolve_admin_car_payload(payload), user["id"])
@@ -416,3 +480,79 @@ def review_admin_change_request(sub, request_id, status, review_notes, final_pay
         "request": reviewed,
         "car": applied_car,
     }
+
+
+def list_hot_wheels_staging(sub, review_status=None, page_type=None, keyword=None, job_id=None, limit=20, offset=0):
+    require_admin(sub)
+    # Staging rows are intentionally review-first. We keep them isolated from
+    # `cars` until the parser and dedup behavior are stable enough to import.
+    return car_repository.list_hot_wheels_staging(
+        review_status=review_status,
+        page_type=page_type,
+        keyword=keyword,
+        job_id=job_id,
+        limit=limit,
+        offset=offset,
+    )
+
+
+def get_hot_wheels_staging_item(sub, item_id):
+    require_admin(sub)
+    item = car_repository.get_hot_wheels_staging_item(item_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="Staged row not found")
+    return item
+
+
+def review_hot_wheels_staging_item(sub, item_id, review_status, review_notes):
+    admin = require_admin(sub)
+    if review_status not in {"pending", "approved", "rejected", "flagged"}:
+        raise HTTPException(status_code=400, detail="Invalid review status")
+
+    item = car_repository.get_hot_wheels_staging_item(item_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="Staged row not found")
+
+    if review_status == "approved":
+        return _import_hot_wheels_staging_item(admin["id"], item, review_notes=review_notes)
+
+    reviewed = car_repository.review_hot_wheels_staging_item(
+        item_id=item_id,
+        review_status=review_status,
+        review_notes=review_notes,
+    )
+    if not reviewed:
+        raise HTTPException(status_code=404, detail="Staged row not found")
+    return reviewed
+
+
+def batch_review_hot_wheels_staging_items(sub, item_ids, review_status, review_notes, force=False):
+    admin = require_admin(sub)
+    if review_status not in {"pending", "approved", "rejected", "flagged"}:
+        raise HTTPException(status_code=400, detail="Invalid review status")
+    if not item_ids:
+        raise HTTPException(status_code=400, detail="itemIds is required")
+
+    if review_status == "approved":
+        items = car_repository.list_hot_wheels_staging_items_by_ids(item_ids)
+        found_ids = {str(item["id"]) for item in items}
+        missing_ids = [item_id for item_id in item_ids if item_id not in found_ids]
+        if missing_ids:
+            raise HTTPException(status_code=404, detail=f"Staged rows not found: {', '.join(missing_ids)}")
+
+        return [
+            _import_hot_wheels_staging_item(admin["id"], item, review_notes=review_notes)
+            for item in items
+            if force or item.get("review_status") == "pending"
+        ]
+
+    return car_repository.batch_review_hot_wheels_staging_items(
+        item_ids=item_ids,
+        review_status=review_status,
+        review_notes=review_notes,
+    )
+
+
+def list_hot_wheels_staging_jobs(sub, limit=20, offset=0):
+    require_admin(sub)
+    return car_repository.list_hot_wheels_staging_jobs(limit=limit, offset=offset)

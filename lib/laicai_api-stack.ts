@@ -16,6 +16,7 @@ import { GetCollectionConstruct } from './contructs/lambdas/collections/GetColle
 import { LikeCollectionConstruct } from './contructs/lambdas/collections/LikeCollectionConstruct';
 import { AddtionalCarDataPopulatorConstruct } from './contructs/lambdas/crawlers/AddtionalCarDataConstruct';
 import { CrawlerConstruct } from './contructs/lambdas/crawlers/CarCrawlerConstruct';
+import { HotWheelsCrawlerConstruct } from './contructs/lambdas/crawlers/HotWheelsCrawlerConstruct';
 import { InnoCrawlerConstruct } from './contructs/lambdas/crawlers/InnoCrawlerConstruct';
 import { PopRaceCrawlerConstruct } from './contructs/lambdas/crawlers/PopRaceCrawlerConstruct';
 import { TWCrawlerConstruct } from './contructs/lambdas/crawlers/TWCrawlerConstruct';
@@ -81,7 +82,8 @@ export class LaicaiApiStack extends cdk.Stack {
 		const { function: tarmacworksCrawlFunction } = new TWCrawlerConstruct(this, 'CrawlerTW', { bucket: crawlerBucket.bucket, secret: dbSecret, vpc: carsVpc, carRDSInstance, logsTable, layer: commonLayer });
 		const { function: innoCrawlFunction } = new InnoCrawlerConstruct(this, 'CrawlerInno', { bucket: crawlerBucket.bucket, secret: dbSecret, vpc: carsVpc, carRDSInstance, logsTable, layer: commonLayer });
 		const { function: popraceCrawlerFunction } = new PopRaceCrawlerConstruct(this, 'CrawlerPoprace', { bucket: crawlerBucket.bucket, secret: dbSecret, vpc: carsVpc, carRDSInstance, logsTable, layer: commonLayer });
-		new CrawlerHelperApiConstruct(this, 'CrawlerHelperApi', { minigtCrawlFunction, tarmacworksCrawlFunction, innoCrawlFunction, popraceCrawlerFunction });
+		const { function: hotWheelsCrawlerFunction } = new HotWheelsCrawlerConstruct(this, 'CrawlerHotWheels', { bucket: crawlerBucket.bucket, secret: dbSecret, vpc: carsVpc, carRDSInstance, logsTable, layer: commonLayer });
+		new CrawlerHelperApiConstruct(this, 'CrawlerHelperApi', { minigtCrawlFunction, tarmacworksCrawlFunction, innoCrawlFunction, popraceCrawlerFunction, hotWheelsCrawlerFunction });
 		const { function: addtionalDataFunction } = new AddtionalCarDataPopulatorConstruct(this, 'AddtionalCarDataPopulator', { bucket: crawlerBucket.bucket, secret: dbSecret, vpc: carsVpc, carRDSInstance, logsTable, layer: commonLayer });
 		new AdditionalDataHelperApiConstruct(this, 'AddtionalDataHelperApi', { addtionalDataFunction });
 

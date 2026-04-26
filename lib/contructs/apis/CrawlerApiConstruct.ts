@@ -7,6 +7,7 @@ interface CrawlerHelperApiConstructProps {
     tarmacworksCrawlFunction: Function,
     innoCrawlFunction: Function,
     popraceCrawlerFunction: Function,
+    hotWheelsCrawlerFunction: Function,
 }
 
 export class CrawlerHelperApiConstruct extends Construct {
@@ -20,6 +21,7 @@ export class CrawlerHelperApiConstruct extends Construct {
             tarmacworksCrawlFunction,
             innoCrawlFunction,
             popraceCrawlerFunction,
+            hotWheelsCrawlerFunction,
         } = props;
 
         this.api = new apigateway.RestApi(this, "CrawlerHelperApi", {
@@ -34,10 +36,12 @@ export class CrawlerHelperApiConstruct extends Construct {
         const crawlTarmacworks = this.api.root.addResource('crawl_tarmacworks');
         const crawlInno = this.api.root.addResource('crawl_inno');
         const crawPoprace = this.api.root.addResource('crawl_poprace');
+        const crawlHotWheels = this.api.root.addResource('crawl_hotwheels');
 
         crawlMinigt.addMethod("POST", new apigateway.LambdaIntegration(minigtCrawlFunction));
         crawlTarmacworks.addMethod("POST", new apigateway.LambdaIntegration(tarmacworksCrawlFunction));
         crawlInno.addMethod("POST", new apigateway.LambdaIntegration(innoCrawlFunction));
         crawPoprace.addMethod("POST", new apigateway.LambdaIntegration(popraceCrawlerFunction));
+        crawlHotWheels.addMethod("POST", new apigateway.LambdaIntegration(hotWheelsCrawlerFunction));
     }
 }

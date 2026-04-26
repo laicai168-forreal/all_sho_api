@@ -2,6 +2,7 @@
 
 import json
 import uuid
+import re
 
 from psycopg2.extras import Json, RealDictCursor
 
@@ -173,6 +174,23 @@ def get_car_by_id(car_id):
             WHERE c.id = %s
             """,
             (car_id,),
+        )
+        return cur.fetchone()
+
+
+def get_car_by_brand_and_original_id(brand, original_id):
+    conn = get_db_connection()
+
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute(
+            """
+            SELECT *
+            FROM cars
+            WHERE LOWER(brand) = LOWER(%s)
+              AND original_id = %s
+            LIMIT 1
+            """,
+            (brand, original_id),
         )
         return cur.fetchone()
 
@@ -571,6 +589,11 @@ def create_product_line(name, brand_id):
         return cur.fetchone()
 
 
+def build_hot_wheels_code(sku):
+    slug = re.sub(r"[^a-z0-9]+", "-", (sku or "").strip().lower()).strip("-")
+    return f"hotwheels-{slug or uuid.uuid4().hex[:10]}"
+
+
 def duplicate_car(source_car_id, actor_user_id, overrides=None):
     overrides = overrides or {}
     source = get_car_by_id(source_car_id)
@@ -811,3 +834,246 @@ def review_change_request(request_id, status, review_notes, reviewed_by, car_id=
         return None
 
     return get_change_request_detail(request_id)
+
+
+def list_hot_wheels_staging(review_status=None, page_type=None, keyword=None, job_id=None, limit=20, offset=0):
+    conn = get_db_connection()
+    filters = []
+    values = []
+    has_job_id_column = hot_wheels_staging_has_job_id_column(conn)
+
+    if review_status:
+        filters.append("review_status = %s")
+        values.append(review_status)
+
+    if page_type:
+        filters.append("page_type = %s")
+        values.append(page_type)
+
+    if job_id and has_job_id_column:
+        filters.append("job_id = %s")
+        values.append(job_id)
+
+    if keyword:
+        filters.append(
+            """
+            (
+                sku ILIKE %s
+                OR title ILIKE %s
+                OR page_title ILIKE %s
+                OR source_url ILIKE %s
+                OR COALESCE(series_name, '') ILIKE %s
+                OR COALESCE(section_name, '') ILIKE %s
+            )
+            """
+        )
+        pattern = f"%{keyword}%"
+        values.extend([pattern, pattern, pattern, pattern, pattern, pattern])
+
+    where_clause = f"WHERE {' AND '.join(filters)}" if filters else ""
+
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        # Window count keeps the admin table paginated without a second count
+        # query, which is useful while we are still iterating on parser output.
+        cur.execute(
+            f"""
+            SELECT
+                hws.*,
+                COUNT(*) OVER() AS total_count
+            FROM hot_wheels_fandom_staging hws
+            {where_clause}
+            ORDER BY hws.updated_at DESC, hws.created_at DESC
+            LIMIT %s OFFSET %s
+            """,
+            values + [limit, offset],
+        )
+        rows = cur.fetchall()
+
+    total = rows[0]["total_count"] if rows else 0
+    items = [{k: v for k, v in row.items() if k != "total_count"} for row in rows]
+
+    return {
+        "items": items,
+        "total": int(total or 0),
+        "limit": limit,
+        "offset": offset,
+    }
+
+
+def get_hot_wheels_staging_item(item_id):
+    conn = get_db_connection()
+
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute(
+            """
+            SELECT *
+            FROM hot_wheels_fandom_staging
+            WHERE id = %s
+            """,
+            (item_id,),
+        )
+        return cur.fetchone()
+
+
+def list_hot_wheels_staging_items_by_ids(item_ids):
+    if not item_ids:
+        return []
+
+    conn = get_db_connection()
+
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute(
+            """
+            SELECT *
+            FROM hot_wheels_fandom_staging
+            WHERE id = ANY(%s::uuid[])
+            ORDER BY updated_at DESC, created_at DESC
+            """,
+            (item_ids,),
+        )
+        return cur.fetchall()
+
+
+def review_hot_wheels_staging_item(item_id, review_status, review_notes):
+    conn = get_db_connection()
+
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute(
+            """
+            UPDATE hot_wheels_fandom_staging
+            SET
+                review_status = %s,
+                review_notes = %s,
+                updated_at = NOW()
+            WHERE id = %s
+            RETURNING *
+            """,
+            (review_status, review_notes, item_id),
+        )
+        reviewed = cur.fetchone()
+
+    return reviewed
+
+
+def mark_hot_wheels_staging_imported(item_id, imported_car_id, review_notes=None):
+    conn = get_db_connection()
+
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute(
+            """
+            UPDATE hot_wheels_fandom_staging
+            SET
+                review_status = 'imported',
+                imported_car_id = %s,
+                review_notes = %s,
+                updated_at = NOW()
+            WHERE id = %s
+            RETURNING *
+            """,
+            (imported_car_id, review_notes, item_id),
+        )
+        return cur.fetchone()
+
+
+def batch_review_hot_wheels_staging_items(item_ids, review_status, review_notes):
+    if not item_ids:
+        return []
+
+    conn = get_db_connection()
+
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute(
+            """
+            UPDATE hot_wheels_fandom_staging
+            SET
+                review_status = %s,
+                review_notes = %s,
+                updated_at = NOW()
+            WHERE id = ANY(%s::uuid[])
+            RETURNING *
+            """,
+            (review_status, review_notes, item_ids),
+        )
+        return cur.fetchall()
+
+
+def list_hot_wheels_staging_jobs(limit=20, offset=0):
+    conn = get_db_connection()
+    if not hot_wheels_staging_has_job_id_column(conn):
+        return {
+            "items": [],
+            "total": 0,
+            "limit": limit,
+            "offset": offset,
+        }
+
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute(
+            """
+            WITH job_rows AS (
+                SELECT
+                    job_id,
+                    MAX(updated_at) AS latest_updated_at,
+                    MIN(created_at) AS first_created_at,
+                    COUNT(*) AS row_count,
+                    COUNT(*) FILTER (WHERE review_status = 'pending') AS pending_count,
+                    COUNT(*) FILTER (WHERE review_status = 'approved') AS approved_count,
+                    COUNT(*) FILTER (WHERE review_status = 'rejected') AS rejected_count,
+                    COUNT(*) FILTER (WHERE review_status = 'flagged') AS flagged_count
+                FROM hot_wheels_fandom_staging
+                WHERE job_id IS NOT NULL
+                GROUP BY job_id
+            )
+            SELECT
+                job_id,
+                latest_updated_at,
+                first_created_at,
+                row_count,
+                pending_count,
+                approved_count,
+                rejected_count,
+                flagged_count,
+                COUNT(*) OVER() AS total_count
+            FROM job_rows
+            ORDER BY latest_updated_at DESC
+            LIMIT %s OFFSET %s
+            """,
+            (limit, offset),
+        )
+        rows = cur.fetchall()
+
+    total = rows[0]["total_count"] if rows else 0
+    items = [{k: v for k, v in row.items() if k != "total_count"} for row in rows]
+    return {
+        "items": items,
+        "total": int(total or 0),
+        "limit": limit,
+        "offset": offset,
+    }
+
+
+def hot_wheels_staging_has_job_id_column(conn=None):
+    own_conn = conn is None
+    conn = conn or get_db_connection()
+
+    try:
+        with conn.cursor() as cur:
+            # The Hot Wheels staging feature shipped before `job_id` existed.
+            # Keep review/list APIs backward-compatible so environments that
+            # missed the later migration still load instead of crashing.
+            cur.execute(
+                """
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM information_schema.columns
+                    WHERE table_schema = 'public'
+                      AND table_name = 'hot_wheels_fandom_staging'
+                      AND column_name = 'job_id'
+                )
+                """
+            )
+            row = cur.fetchone()
+            return bool(row and row[0])
+    finally:
+        if own_conn:
+            conn.close()

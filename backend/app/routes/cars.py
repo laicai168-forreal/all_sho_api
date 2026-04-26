@@ -12,6 +12,8 @@ from app.models.car_models import (
     CreateCarChangeRequestImageUploadRequest,
     CarMutationRequest,
     CarDuplicateRequest,
+    HotWheelsStagingBatchReviewRequest,
+    HotWheelsStagingReviewRequest,
 )
 from app.services import car_service, profile_image_service
 
@@ -107,6 +109,77 @@ def review_admin_change_request(request: Request, request_id: UUID, body: CarCha
         status=body.status,
         review_notes=body.reviewNotes,
         final_payload=body.finalPayload,
+    )
+
+
+@router.get("/admin/hot-wheels-staging")
+def list_admin_hot_wheels_staging(
+    request: Request,
+    reviewStatus: str | None = None,
+    pageType: str | None = None,
+    keyword: str | None = None,
+    jobId: str | None = None,
+    limit: int = 20,
+    offset: int = 0,
+):
+    sub = get_current_user_sub(request)
+    # This review surface stays separate from the main cars table on purpose:
+    # staged Fandom rows can be iterated on until the parser is trustworthy.
+    return car_service.list_hot_wheels_staging(
+        sub,
+        review_status=reviewStatus,
+        page_type=pageType,
+        keyword=keyword,
+        job_id=jobId,
+        limit=limit,
+        offset=offset,
+    )
+
+
+@router.get("/admin/hot-wheels-staging/jobs")
+def list_admin_hot_wheels_staging_jobs(
+    request: Request,
+    limit: int = 20,
+    offset: int = 0,
+):
+    sub = get_current_user_sub(request)
+    return car_service.list_hot_wheels_staging_jobs(sub, limit=limit, offset=offset)
+
+
+@router.get("/admin/hot-wheels-staging/{item_id}")
+def get_admin_hot_wheels_staging_item(request: Request, item_id: UUID):
+    sub = get_current_user_sub(request)
+    return car_service.get_hot_wheels_staging_item(sub, str(item_id))
+
+
+@router.post("/admin/hot-wheels-staging/{item_id}/review")
+def review_admin_hot_wheels_staging_item(
+    request: Request,
+    item_id: UUID,
+    body: HotWheelsStagingReviewRequest,
+):
+    sub = get_current_user_sub(request)
+    # Review status here is only for staging workflow, not final car import.
+    return car_service.review_hot_wheels_staging_item(
+        sub,
+        str(item_id),
+        body.reviewStatus,
+        body.reviewNotes,
+    )
+
+
+@router.post("/admin/hot-wheels-staging/review")
+def batch_review_admin_hot_wheels_staging(
+    request: Request,
+    body: HotWheelsStagingBatchReviewRequest,
+):
+    sub = get_current_user_sub(request)
+    return car_service.batch_review_hot_wheels_staging_items(
+        sub,
+        body.itemIds,
+        body.reviewStatus,
+        body.reviewNotes,
+        body.force,
     )
 
 
