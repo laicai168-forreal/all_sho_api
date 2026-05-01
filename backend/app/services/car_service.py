@@ -1,14 +1,20 @@
 # app/services/car_service.py
 
+import os
+import time
 import uuid
+from urllib.parse import urlencode, urlparse
 
 from fastapi import HTTPException
+import requests
 
 from app.repositories import car_repository, user_repository
 from app.services import profile_image_service
 
 WEEKLY_CHANGE_REQUEST_LIMIT = 5
 CASE_INSENSITIVE_SUGGESTION_FIELDS = {"brand", "make", "product_line"}
+BRAVE_SEARCH_API_KEY = os.environ.get("BRAVE_SEARCH_API_KEY")
+BRAVE_IMAGE_SEARCH_URL = "https://api.search.brave.com/res/v1/images/search"
 
 
 def _get_user_by_sub_or_401(sub):
@@ -34,13 +40,45 @@ def require_admin(sub):
     return user
 
 
-def list_public_cars(sub, bid=None, keyword=None, limit=20, offset=0):
+def list_public_brands():
+    # Featured brands are the visible brands that currently have cars in the
+    # public catalog. Counts are calculated dynamically so crawler/import flows
+    # do not need to maintain a second denormalized counter.
+    return car_repository.list_brands(include_hidden=False, include_counts=True, only_with_cars=True)
+
+
+def list_admin_brands(sub):
+    require_admin(sub)
+    return car_repository.list_brands(include_hidden=True, include_counts=True, only_with_cars=False)
+
+
+def update_admin_brand_visibility(sub, brand_id, is_visible):
+    require_admin(sub)
+    updated = car_repository.update_brand_visibility(brand_id, is_visible)
+    if not updated:
+        raise HTTPException(status_code=404, detail="Brand not found")
+    return updated
+
+
+def _can_include_hidden_brands(sub, include_hidden):
+    if not include_hidden:
+        return False
+    user = _get_user_by_sub_or_none(sub)
+    return bool(user and user.get("role") == "admin")
+
+
+def list_public_cars(sub, bid=None, keyword=None, limit=20, offset=0, include_hidden=False):
     # Preserve the legacy `/cars` list contract while moving execution into the
     # FastAPI stack. The response still includes brand metadata because the
     # cars page depends on it for filter dropdowns.
     user = _get_user_by_sub_or_none(sub)
     filters = []
     values = []
+
+    if not _can_include_hidden_brands(sub, include_hidden):
+        # Hidden brands are excluded from normal `/cars` reads. Admin surfaces
+        # may opt into them explicitly through `includeHidden=true`.
+        filters.append("COALESCE(b.is_visible, TRUE) = TRUE")
 
     if bid:
         filters.append("b.id = %s")
@@ -61,19 +99,28 @@ def list_public_cars(sub, bid=None, keyword=None, limit=20, offset=0):
     return result
 
 
-def get_public_car_detail(sub, car_id):
+def get_public_car_detail(sub, car_id, include_hidden=False):
     # Single-car reads share the same user-aware enrichment as the list path so
     # detail pages keep own/liked state without a second API.
     user = _get_user_by_sub_or_none(sub)
-    item = car_repository.get_public_car_detail(car_id, user["id"] if user else None)
+    item = car_repository.get_public_car_detail(
+        car_id,
+        user["id"] if user else None,
+        include_hidden=_can_include_hidden_brands(sub, include_hidden),
+    )
     if not item:
         raise HTTPException(status_code=404, detail="Car not found")
     return item
 
 
-def list_public_car_owners(car_id, limit=20, offset=0):
+def list_public_car_owners(sub, car_id, limit=20, offset=0, include_hidden=False):
     # Owner pagination is kept separate from the main detail payload so the
     # preview can stay lightweight while expanded lists paginate on demand.
+    if not car_repository.get_public_car_detail(
+        car_id,
+        include_hidden=_can_include_hidden_brands(sub, include_hidden),
+    ):
+        raise HTTPException(status_code=404, detail="Car not found")
     return car_repository.list_car_owners(car_id, limit=limit, offset=offset)
 
 
@@ -239,11 +286,318 @@ def _build_hot_wheels_import_payload(staged_item, existing_car=None):
     return payload
 
 
+def _build_hot_wheels_image_search_query(staged_item, *, include_year=True, include_color=True):
+    raw_row = staged_item.get("raw_row") or {}
+    release_year = staged_item.get("release_year")
+    casting_name = staged_item.get("title") or staged_item.get("page_title") or ""
+    sku = staged_item.get("sku") or ""
+    series_name = staged_item.get("series_name") or None
+
+    parts = []
+    if include_year and release_year:
+        parts.append(str(release_year))
+    parts.append("hot wheels")
+    if casting_name:
+        parts.append(casting_name)
+
+    if sku and not str(sku).startswith("TEMP-"):
+        parts.append(str(sku))
+    elif series_name:
+        parts.append(series_name)
+    elif isinstance(raw_row, dict) and raw_row.get("series_names"):
+        series_names = raw_row.get("series_names") or []
+        if series_names:
+            parts.append(str(series_names[0]))
+
+    color = _extract_hot_wheels_color_hint(raw_row) if include_color else None
+    if color:
+        parts.append(color)
+
+    return " ".join(part for part in parts if part)
+
+
+def _extract_hot_wheels_color_hint(raw_row):
+    if not isinstance(raw_row, dict):
+        return None
+
+    def clean_color(value):
+        if value is None:
+            return None
+        cleaned = str(value).strip()
+        if not cleaned:
+            return None
+        if cleaned.lower() in {"n/a", "na", "none", "unknown", "?", "-", "--"}:
+            return None
+        return cleaned
+
+    direct_color = clean_color(raw_row.get("color"))
+    if direct_color:
+        return direct_color
+
+    variations = raw_row.get("variations")
+    if isinstance(variations, list):
+        for variation in variations:
+            if not isinstance(variation, dict):
+                continue
+            variation_color = clean_color(variation.get("color"))
+            if variation_color:
+                return variation_color
+
+    return None
+
+
+def _get_hot_wheels_image_candidates(raw_row):
+    if not isinstance(raw_row, dict):
+        return []
+    image_candidates = raw_row.get("image_candidates")
+    return image_candidates if isinstance(image_candidates, list) else []
+
+
+def _search_brave_image_candidates(query, limit=5):
+    if not BRAVE_SEARCH_API_KEY:
+        raise HTTPException(status_code=500, detail="BRAVE_SEARCH_API_KEY is not configured")
+
+    headers = {
+        "Accept": "application/json",
+        "X-Subscription-Token": BRAVE_SEARCH_API_KEY,
+    }
+    params = {
+        "q": query,
+        "count": max(1, min(limit, 10)),
+        "safesearch": "off",
+    }
+
+    last_error = None
+    for attempt in range(1, 3):
+        try:
+            response = requests.get(
+                BRAVE_IMAGE_SEARCH_URL,
+                headers=headers,
+                params=params,
+                timeout=20,
+            )
+            response.raise_for_status()
+            data = response.json() or {}
+            return data.get("results") or []
+        except requests.RequestException as exc:
+            last_error = exc
+            status_code = getattr(getattr(exc, "response", None), "status_code", None)
+            response_text = getattr(getattr(exc, "response", None), "text", "") or ""
+            print(
+                "[hot-wheels-image-enrich] brave search failed",
+                {
+                    "query": query,
+                    "attempt": attempt,
+                    "status_code": status_code,
+                    "error": str(exc),
+                    "response_preview": response_text[:300],
+                },
+            )
+
+            if attempt < 2 and (status_code is None or status_code >= 500):
+                time.sleep(0.75)
+                continue
+            break
+
+    raise HTTPException(
+        status_code=503,
+        detail="Brave image search is temporarily unavailable. Please try again shortly.",
+    ) from last_error
+
+
+def _normalize_brave_candidate(result, query, rank):
+    image_candidates = [
+        result.get("properties", {}).get("url"),
+        result.get("thumbnail", {}).get("src"),
+        result.get("url"),
+    ]
+    image_url = next(
+        (
+            candidate_url
+            for candidate_url in image_candidates
+            if candidate_url and not _is_unstable_brave_image_url(candidate_url)
+        ),
+        None,
+    )
+    if not image_url:
+        return None
+
+    source_page_url = result.get("url")
+    title = result.get("title") or result.get("page_title") or None
+    content_type = result.get("properties", {}).get("content_type") or result.get("content_type")
+
+    return {
+        "candidate_id": uuid.uuid4().hex,
+        "search_query": query,
+        "rank": rank,
+        "status": "pending",
+        "title": title,
+        "image_source_url": image_url,
+        "source_page_url": source_page_url,
+        "content_type": content_type,
+    }
+
+
+def _is_unstable_brave_image_url(url):
+    try:
+        parsed = urlparse(str(url))
+    except Exception:
+        return True
+
+    host = (parsed.netloc or "").lower()
+    path = (parsed.path or "").lower()
+    query = (parsed.query or "").lower()
+
+    if not host:
+        return True
+
+    # Brave sometimes surfaces intermediary image transformation/proxy URLs
+    # that are much less stable than the underlying source image.
+    if host.startswith("imaginary.") or ".imaginary." in host:
+        return True
+
+    proxy_markers = {"convert", "resize", "transform", "imgproxy", "proxy", "cdn-cgi"}
+    if any(marker in path for marker in proxy_markers):
+        return True
+    if any(marker in query for marker in proxy_markers):
+        return True
+
+    return False
+
+
+def _append_hot_wheels_image_candidates(staged_item, brave_results, query):
+    raw_row = dict(staged_item.get("raw_row") or {})
+    existing_candidates = _get_hot_wheels_image_candidates(raw_row)
+    existing_source_urls = {
+        candidate.get("image_source_url")
+        for candidate in existing_candidates
+        if isinstance(candidate, dict)
+    }
+    next_candidates = list(existing_candidates)
+
+    for index, result in enumerate(brave_results, start=1):
+        normalized = _normalize_brave_candidate(result, query, index)
+        if not normalized:
+            continue
+        if normalized["image_source_url"] in existing_source_urls:
+            continue
+
+        try:
+            review_image = profile_image_service.create_hot_wheels_review_image(
+                str(staged_item["id"]),
+                normalized["image_source_url"],
+                file_stem=f"{staged_item.get('sku') or 'candidate'}-{index}",
+                content_type=normalized.get("content_type"),
+            )
+        except Exception as exc:
+            print(
+                "[hot-wheels-image-enrich] skipped candidate",
+                {
+                    "staging_item_id": str(staged_item.get("id")),
+                    "candidate_rank": index,
+                    "query": query,
+                    "image_source_url": normalized.get("image_source_url"),
+                    "error": str(exc),
+                },
+            )
+            continue
+
+        normalized["review_object_key"] = review_image["objectKey"]
+        normalized["review_file_url"] = review_image["fileUrl"]
+        normalized["content_type"] = review_image["contentType"]
+        normalized["size"] = review_image["size"]
+
+        next_candidates.append(normalized)
+        existing_source_urls.add(normalized["image_source_url"])
+
+    raw_row["image_candidates"] = next_candidates
+    raw_row["image_candidate_query"] = query
+    return raw_row
+
+
+def _merge_approved_hot_wheels_images_into_payload(payload, staged_item):
+    raw_row = staged_item.get("raw_row") or {}
+    approved_candidates = [
+        candidate
+        for candidate in _get_hot_wheels_image_candidates(raw_row)
+        if isinstance(candidate, dict) and candidate.get("status") == "approved" and candidate.get("review_file_url")
+    ]
+    if not approved_candidates:
+        return payload
+
+    merged = dict(payload or {})
+    existing_images = [
+        image for image in list(merged.get("images") or [])
+        if isinstance(image, dict)
+    ]
+    deduped_images = []
+    existing_s3_urls = set()
+    existing_original_urls = set()
+
+    for image in existing_images:
+        s3_url = image.get("s3_url")
+        original_url = image.get("original_url")
+        if (s3_url and s3_url in existing_s3_urls) or (original_url and original_url in existing_original_urls):
+            continue
+        deduped_images.append(image)
+        if s3_url:
+            existing_s3_urls.add(s3_url)
+        if original_url:
+            existing_original_urls.add(original_url)
+
+    for candidate in approved_candidates:
+        canonical_url = profile_image_service.promote_hot_wheels_review_image(candidate["review_file_url"])
+        original_url = candidate.get("image_source_url")
+        if canonical_url in existing_s3_urls or (original_url and original_url in existing_original_urls):
+            continue
+        deduped_images.append({
+            "s3_url": canonical_url,
+            "original_url": original_url,
+        })
+        existing_s3_urls.add(canonical_url)
+        if original_url:
+            existing_original_urls.add(original_url)
+
+    if deduped_images:
+        merged["images"] = deduped_images
+
+    return merged
+
+
+def _sync_approved_hot_wheels_images_to_linked_car(admin_user_id, staged_item):
+    linked_car_id = staged_item.get("imported_car_id")
+    if not linked_car_id:
+        return staged_item
+
+    linked_car = car_repository.get_car_by_id(linked_car_id)
+    if not linked_car:
+        return staged_item
+
+    sync_payload = _merge_approved_hot_wheels_images_into_payload(
+        {"images": linked_car.get("images") or []},
+        staged_item,
+    )
+    if "images" not in sync_payload:
+        return staged_item
+
+    next_images = sync_payload.get("images") or []
+    current_images = linked_car.get("images") or []
+    if next_images == current_images:
+        return staged_item
+
+    car_repository.update_car(
+        linked_car_id,
+        {"images": next_images},
+        admin_user_id,
+    )
+    return car_repository.get_hot_wheels_staging_item(staged_item["id"]) or staged_item
+
+
 def _import_hot_wheels_staging_item(admin_user_id, staged_item, review_notes=None):
     existing_car = car_repository.get_car_by_brand_and_original_id("hotwheels", staged_item["sku"])
-    resolved_payload = _resolve_admin_car_payload(
-        _build_hot_wheels_import_payload(staged_item, existing_car=existing_car)
-    )
+    import_payload = _build_hot_wheels_import_payload(staged_item, existing_car=existing_car)
+    import_payload = _merge_approved_hot_wheels_images_into_payload(import_payload, staged_item)
+    resolved_payload = _resolve_admin_car_payload(import_payload)
 
     if existing_car:
         imported_car = car_repository.update_car(existing_car["id"], resolved_payload, admin_user_id)
@@ -253,16 +607,35 @@ def _import_hot_wheels_staging_item(admin_user_id, staged_item, review_notes=Non
     if not imported_car:
         raise HTTPException(status_code=500, detail="Failed to import staged Hot Wheels row")
 
-    return car_repository.mark_hot_wheels_staging_imported(
+    reviewed = car_repository.mark_hot_wheels_staging_imported(
         staged_item["id"],
         imported_car["id"],
         review_notes=review_notes,
     )
+    return car_repository.get_hot_wheels_staging_item(staged_item["id"]) or reviewed
 
 
 def create_admin_car(sub, payload):
     user = require_admin(sub)
     return car_repository.create_car(_resolve_admin_car_payload(payload), user["id"])
+
+
+def get_admin_car_neighbors(sub, car_id):
+    require_admin(sub)
+    if not car_repository.get_car_by_id(car_id):
+        raise HTTPException(status_code=404, detail="Car not found")
+    return car_repository.get_admin_car_neighbors(car_id) or {
+        "previous_id": None,
+        "next_id": None,
+    }
+
+
+def create_admin_car_image_from_url(sub, image_url):
+    require_admin(sub)
+    normalized = (image_url or "").strip()
+    if not normalized:
+        raise HTTPException(status_code=400, detail="imageUrl is required")
+    return profile_image_service.create_admin_car_image_from_url(normalized)
 
 
 def update_admin_car(sub, car_id, payload):
@@ -319,7 +692,8 @@ def duplicate_admin_car(sub, source_car_id, payload):
 def get_admin_car_form_options(sub):
     require_admin(sub)
     return {
-        "brands": car_repository.list_brands(),
+        # Admin editors still need access to hidden brands for maintenance.
+        "brands": car_repository.list_brands(include_hidden=True),
         "makes": car_repository.list_makes(),
         "productLines": car_repository.list_product_lines(),
     }
@@ -482,7 +856,16 @@ def review_admin_change_request(sub, request_id, status, review_notes, final_pay
     }
 
 
-def list_hot_wheels_staging(sub, review_status=None, page_type=None, keyword=None, job_id=None, limit=20, offset=0):
+def list_hot_wheels_staging(
+    sub,
+    review_status=None,
+    page_type=None,
+    keyword=None,
+    job_id=None,
+    car_images_state=None,
+    limit=20,
+    offset=0,
+):
     require_admin(sub)
     # Staging rows are intentionally review-first. We keep them isolated from
     # `cars` until the parser and dedup behavior are stable enough to import.
@@ -491,6 +874,7 @@ def list_hot_wheels_staging(sub, review_status=None, page_type=None, keyword=Non
         page_type=page_type,
         keyword=keyword,
         job_id=job_id,
+        car_images_state=car_images_state,
         limit=limit,
         offset=offset,
     )
@@ -523,7 +907,119 @@ def review_hot_wheels_staging_item(sub, item_id, review_status, review_notes):
     )
     if not reviewed:
         raise HTTPException(status_code=404, detail="Staged row not found")
-    return reviewed
+    return car_repository.get_hot_wheels_staging_item(item_id) or reviewed
+
+
+def enrich_hot_wheels_staging_images(sub, item_ids, limit_per_item=5, query_override=None):
+    require_admin(sub)
+    if not item_ids:
+        raise HTTPException(status_code=400, detail="itemIds is required")
+
+    items = car_repository.list_hot_wheels_staging_items_by_ids(item_ids)
+    found_ids = {str(item["id"]) for item in items}
+    missing_ids = [item_id for item_id in item_ids if item_id not in found_ids]
+    if missing_ids:
+        raise HTTPException(status_code=404, detail=f"Staged rows not found: {', '.join(missing_ids)}")
+
+    enriched = []
+    for item in items:
+        query = (query_override or "").strip() or _build_hot_wheels_image_search_query(item)
+        brave_results = _search_brave_image_candidates(query, limit=limit_per_item)
+        raw_row = _append_hot_wheels_image_candidates(item, brave_results, query)
+        updated = car_repository.update_hot_wheels_staging_raw_row(str(item["id"]), raw_row)
+        enriched.append(updated or item)
+
+    return enriched
+
+
+def review_hot_wheels_image_candidate(sub, item_id, candidate_id, action):
+    admin = require_admin(sub)
+    if action not in {"approve", "reject", "delete", "pending"}:
+        raise HTTPException(status_code=400, detail="Invalid image review action")
+
+    item = car_repository.get_hot_wheels_staging_item(item_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="Staged row not found")
+
+    raw_row = dict(item.get("raw_row") or {})
+    image_candidates = list(_get_hot_wheels_image_candidates(raw_row))
+    target = next(
+        (candidate for candidate in image_candidates if isinstance(candidate, dict) and candidate.get("candidate_id") == candidate_id),
+        None,
+    )
+    if not target:
+        raise HTTPException(status_code=404, detail="Image candidate not found")
+
+    if action == "delete":
+        profile_image_service.delete_hot_wheels_review_image(target.get("review_file_url"))
+        image_candidates = [
+            candidate
+            for candidate in image_candidates
+            if not (isinstance(candidate, dict) and candidate.get("candidate_id") == candidate_id)
+        ]
+    else:
+        target["status"] = {
+            "approve": "approved",
+            "reject": "rejected",
+            "pending": "pending",
+        }[action]
+
+    raw_row["image_candidates"] = image_candidates
+    updated = car_repository.update_hot_wheels_staging_raw_row(item_id, raw_row) or item
+    refreshed = car_repository.get_hot_wheels_staging_item(item_id) or updated
+    if action == "approve":
+        return _sync_approved_hot_wheels_images_to_linked_car(admin["id"], refreshed)
+    return refreshed
+
+
+def batch_review_hot_wheels_image_candidates(sub, item_id, candidate_ids, action):
+    admin = require_admin(sub)
+    if action not in {"approve", "reject", "delete", "pending"}:
+        raise HTTPException(status_code=400, detail="Invalid image review action")
+    if not candidate_ids:
+        raise HTTPException(status_code=400, detail="candidateIds is required")
+
+    item = car_repository.get_hot_wheels_staging_item(item_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="Staged row not found")
+
+    raw_row = dict(item.get("raw_row") or {})
+    image_candidates = list(_get_hot_wheels_image_candidates(raw_row))
+    candidate_id_set = set(candidate_ids)
+    found_ids = {
+        candidate.get("candidate_id")
+        for candidate in image_candidates
+        if isinstance(candidate, dict) and candidate.get("candidate_id") in candidate_id_set
+    }
+    missing_ids = [candidate_id for candidate_id in candidate_ids if candidate_id not in found_ids]
+    if missing_ids:
+        raise HTTPException(status_code=404, detail=f"Image candidates not found: {', '.join(missing_ids)}")
+
+    if action == "delete":
+        for candidate in image_candidates:
+            if isinstance(candidate, dict) and candidate.get("candidate_id") in candidate_id_set:
+                profile_image_service.delete_hot_wheels_review_image(candidate.get("review_file_url"))
+        image_candidates = [
+            candidate
+            for candidate in image_candidates
+            if not (isinstance(candidate, dict) and candidate.get("candidate_id") in candidate_id_set)
+        ]
+    else:
+        next_status = {
+            "approve": "approved",
+            "reject": "rejected",
+            "pending": "pending",
+        }[action]
+        for candidate in image_candidates:
+            if isinstance(candidate, dict) and candidate.get("candidate_id") in candidate_id_set:
+                candidate["status"] = next_status
+
+    raw_row["image_candidates"] = image_candidates
+    updated = car_repository.update_hot_wheels_staging_raw_row(item_id, raw_row) or item
+    refreshed = car_repository.get_hot_wheels_staging_item(item_id) or updated
+    if action == "approve":
+        return _sync_approved_hot_wheels_images_to_linked_car(admin["id"], refreshed)
+    return refreshed
 
 
 def batch_review_hot_wheels_staging_items(sub, item_ids, review_status, review_notes, force=False):
@@ -556,3 +1052,14 @@ def batch_review_hot_wheels_staging_items(sub, item_ids, review_status, review_n
 def list_hot_wheels_staging_jobs(sub, limit=20, offset=0):
     require_admin(sub)
     return car_repository.list_hot_wheels_staging_jobs(limit=limit, offset=offset)
+
+
+def delete_hot_wheels_staging_job(sub, job_id):
+    require_admin(sub)
+    deleted_count = car_repository.delete_hot_wheels_staging_job(job_id)
+    if deleted_count <= 0:
+        raise HTTPException(status_code=404, detail="Hot Wheels staging job not found")
+    return {
+        "jobId": job_id,
+        "deletedCount": deleted_count,
+    }

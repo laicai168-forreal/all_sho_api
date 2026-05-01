@@ -18,6 +18,7 @@ interface UserFastApiConstructProps {
     dbSecret: secret.ISecret;
     layer: lambda.LayerVersion;
     profileImageBucket: s3.IBucket;
+    carImageBucket: s3.IBucket;
 }
 
 export class UserFastApiConstruct extends Construct {
@@ -26,7 +27,7 @@ export class UserFastApiConstruct extends Construct {
     constructor(scope: Construct, id: string, props: UserFastApiConstructProps) {
         super(scope, id);
 
-        const { httpApi, authorizer, vpc, rds, dbSecret, layer, profileImageBucket } = props;
+        const { httpApi, authorizer, vpc, rds, dbSecret, layer, profileImageBucket, carImageBucket } = props;
 
         // Lambda
         this.function = new lambda.Function(this, "UserFastApiFn", {
@@ -40,6 +41,8 @@ export class UserFastApiConstruct extends Construct {
                 DB_SECRET_ARN: dbSecret.secretArn,
                 DB_NAME: "carsdb",
                 PROFILE_IMAGE_BUCKET: profileImageBucket.bucketName,
+                CAR_IMAGE_BUCKET: carImageBucket.bucketName,
+                BRAVE_SEARCH_API_KEY: process.env.BRAVE_SEARCH_API_KEY || "",
             },
         });
 
@@ -50,6 +53,7 @@ export class UserFastApiConstruct extends Construct {
         dbSecret.grantRead(this.function);
         rds.connections.allowDefaultPortFrom(this.function);
         profileImageBucket.grantReadWrite(this.function);
+        carImageBucket.grantReadWrite(this.function);
 
         const integration = new HttpLambdaIntegration(
             "UserFastApiIntegration",
@@ -104,6 +108,13 @@ export class UserFastApiConstruct extends Construct {
 
         httpApi.addRoutes({
             path: "/cars",
+            methods: [apigwv2.HttpMethod.GET],
+            integration,
+            authorizer,
+        });
+
+        httpApi.addRoutes({
+            path: "/brands",
             methods: [apigwv2.HttpMethod.GET],
             integration,
             authorizer,

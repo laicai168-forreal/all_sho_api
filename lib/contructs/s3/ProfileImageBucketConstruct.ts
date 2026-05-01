@@ -1,4 +1,4 @@
-import { RemovalPolicy } from 'aws-cdk-lib';
+import { Duration, RemovalPolicy } from 'aws-cdk-lib';
 import { Construct } from 'constructs';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as s3 from 'aws-cdk-lib/aws-s3';
@@ -20,6 +20,12 @@ export class ProfileImageBucketConstruct extends Construct {
                     allowedOrigins: ['*'],
                     allowedMethods: [s3.HttpMethods.GET, s3.HttpMethods.PUT, s3.HttpMethods.HEAD],
                     allowedHeaders: ['*'],
+                },
+            ],
+            lifecycleRules: [
+                {
+                    prefix: 'hot-wheels-image-review/',
+                    expiration: Duration.days(60),
                 },
             ],
         });

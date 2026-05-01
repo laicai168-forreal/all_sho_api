@@ -195,6 +195,33 @@ def get_car_by_brand_and_original_id(brand, original_id):
         return cur.fetchone()
 
 
+def get_admin_car_neighbors(car_id):
+    conn = get_db_connection()
+
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute(
+            """
+            WITH ordered AS (
+                SELECT
+                    id,
+                    ROW_NUMBER() OVER (
+                        ORDER BY crawled_date DESC NULLS LAST, id ASC
+                    ) AS row_num
+                FROM cars
+            )
+            SELECT
+                prev.id AS previous_id,
+                next.id AS next_id
+            FROM ordered current
+            LEFT JOIN ordered prev ON prev.row_num = current.row_num - 1
+            LEFT JOIN ordered next ON next.row_num = current.row_num + 1
+            WHERE current.id = %s
+            """,
+            (car_id,),
+        )
+        return cur.fetchone()
+
+
 def car_image_is_used_elsewhere(car_id, image_url):
     conn = get_db_connection()
 
@@ -223,7 +250,7 @@ def car_image_is_used_elsewhere(car_id, image_url):
         return bool(row and row[0])
 
 
-def get_public_car_detail(car_id, user_id=None):
+def get_public_car_detail(car_id, user_id=None, include_hidden=False):
     # Mirrors the legacy public car-detail response shape, including optional
     # own/liked flags and a small owners preview for the car detail page.
     conn = get_db_connection()
@@ -254,6 +281,7 @@ def get_public_car_detail(car_id, user_id=None):
         user_join = "LEFT JOIN user_liked_items uli ON false"
 
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        hidden_filter = "" if include_hidden else "AND COALESCE(b.is_visible, TRUE) = TRUE"
         cur.execute(
             f"""
             {CAR_STATS_CTE}
@@ -286,6 +314,7 @@ def get_public_car_detail(car_id, user_id=None):
             LEFT JOIN car_stats cs ON cs.car_id = c.id
             LEFT JOIN like_stats ls ON ls.car_id = c.id
             WHERE c.id = %s
+              {hidden_filter}
             """,
             params + [car_id],
         )
@@ -336,6 +365,7 @@ def list_public_cars(filters=None, values=None, user_id=None, limit=20, offset=0
             SELECT
                 c.id,
                 c.title,
+                c.original_id,
                 b.name AS brand,
                 m.name AS make,
                 c.make_ai,
@@ -436,18 +466,60 @@ def list_car_owners(car_id, limit=20, offset=0):
     }
 
 
-def list_brands():
+def list_brands(include_hidden=True, include_counts=False, only_with_cars=False):
+    conn = get_db_connection()
+    conditions = []
+
+    if not include_hidden:
+        conditions.append("COALESCE(b.is_visible, TRUE) = TRUE")
+
+    if only_with_cars:
+        conditions.append("COALESCE(car_counts.car_count, 0) > 0")
+
+    where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+    car_count_select = ", COALESCE(car_counts.car_count, 0) AS car_count" if include_counts else ""
+
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute(
+            f"""
+            SELECT
+                b.id,
+                b.name,
+                COALESCE(b.is_visible, TRUE) AS is_visible
+                {car_count_select}
+            FROM brands b
+            LEFT JOIN (
+                SELECT brand_id, COUNT(*)::int AS car_count
+                FROM cars
+                WHERE brand_id IS NOT NULL
+                GROUP BY brand_id
+            ) car_counts ON car_counts.brand_id = b.id
+            {where_clause}
+            ORDER BY
+                COALESCE(car_counts.car_count, 0) DESC,
+                b.name ASC
+            """
+        )
+        return cur.fetchall()
+
+
+def update_brand_visibility(brand_id, is_visible):
     conn = get_db_connection()
 
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
         cur.execute(
             """
-            SELECT id, name
-            FROM brands
-            ORDER BY name
+            UPDATE brands
+            SET is_visible = %s
+            WHERE id = %s
+            RETURNING id, name, COALESCE(is_visible, TRUE) AS is_visible
             """
+            ,
+            (is_visible, brand_id),
         )
-        return cur.fetchall()
+        row = cur.fetchone()
+        conn.commit()
+        return row
 
 
 def list_makes():
@@ -836,7 +908,15 @@ def review_change_request(request_id, status, review_notes, reviewed_by, car_id=
     return get_change_request_detail(request_id)
 
 
-def list_hot_wheels_staging(review_status=None, page_type=None, keyword=None, job_id=None, limit=20, offset=0):
+def list_hot_wheels_staging(
+    review_status=None,
+    page_type=None,
+    keyword=None,
+    job_id=None,
+    car_images_state=None,
+    limit=20,
+    offset=0,
+):
     conn = get_db_connection()
     filters = []
     values = []
@@ -853,6 +933,27 @@ def list_hot_wheels_staging(review_status=None, page_type=None, keyword=None, jo
     if job_id and has_job_id_column:
         filters.append("job_id = %s")
         values.append(job_id)
+
+    # Linked-car image filters operate on the already imported `cars` row so
+    # admins can focus on staged entries whose live record still needs images.
+    if car_images_state == "has_images":
+        filters.append(
+            """
+            c.id IS NOT NULL
+            AND jsonb_typeof(COALESCE(c.images, '[]'::jsonb)) = 'array'
+            AND jsonb_array_length(COALESCE(c.images, '[]'::jsonb)) > 0
+            """
+        )
+    elif car_images_state == "no_images":
+        filters.append(
+            """
+            c.id IS NOT NULL
+            AND (
+                jsonb_typeof(COALESCE(c.images, '[]'::jsonb)) <> 'array'
+                OR jsonb_array_length(COALESCE(c.images, '[]'::jsonb)) = 0
+            )
+            """
+        )
 
     if keyword:
         filters.append(
@@ -879,8 +980,21 @@ def list_hot_wheels_staging(review_status=None, page_type=None, keyword=None, jo
             f"""
             SELECT
                 hws.*,
+                CASE
+                    WHEN c.id IS NULL THEN FALSE
+                    WHEN jsonb_typeof(COALESCE(c.images, '[]'::jsonb)) = 'array'
+                        THEN jsonb_array_length(COALESCE(c.images, '[]'::jsonb)) > 0
+                    ELSE FALSE
+                END AS imported_car_has_images,
+                CASE
+                    WHEN c.id IS NULL THEN 0
+                    WHEN jsonb_typeof(COALESCE(c.images, '[]'::jsonb)) = 'array'
+                        THEN jsonb_array_length(COALESCE(c.images, '[]'::jsonb))
+                    ELSE 0
+                END AS imported_car_image_count,
                 COUNT(*) OVER() AS total_count
             FROM hot_wheels_fandom_staging hws
+            LEFT JOIN cars c ON c.id = hws.imported_car_id
             {where_clause}
             ORDER BY hws.updated_at DESC, hws.created_at DESC
             LIMIT %s OFFSET %s
@@ -906,9 +1020,23 @@ def get_hot_wheels_staging_item(item_id):
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
         cur.execute(
             """
-            SELECT *
-            FROM hot_wheels_fandom_staging
-            WHERE id = %s
+            SELECT
+                hws.*,
+                CASE
+                    WHEN c.id IS NULL THEN FALSE
+                    WHEN jsonb_typeof(COALESCE(c.images, '[]'::jsonb)) = 'array'
+                        THEN jsonb_array_length(COALESCE(c.images, '[]'::jsonb)) > 0
+                    ELSE FALSE
+                END AS imported_car_has_images,
+                CASE
+                    WHEN c.id IS NULL THEN 0
+                    WHEN jsonb_typeof(COALESCE(c.images, '[]'::jsonb)) = 'array'
+                        THEN jsonb_array_length(COALESCE(c.images, '[]'::jsonb))
+                    ELSE 0
+                END AS imported_car_image_count
+            FROM hot_wheels_fandom_staging hws
+            LEFT JOIN cars c ON c.id = hws.imported_car_id
+            WHERE hws.id = %s
             """,
             (item_id,),
         )
@@ -953,6 +1081,38 @@ def review_hot_wheels_staging_item(item_id, review_status, review_notes):
         reviewed = cur.fetchone()
 
     return reviewed
+
+
+def update_hot_wheels_staging_raw_row(item_id, raw_row, review_notes=None):
+    conn = get_db_connection()
+
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        if review_notes is None:
+            cur.execute(
+                """
+                UPDATE hot_wheels_fandom_staging
+                SET
+                    raw_row = %s::jsonb,
+                    updated_at = NOW()
+                WHERE id = %s
+                RETURNING *
+                """,
+                (json.dumps(raw_row or {}), item_id),
+            )
+        else:
+            cur.execute(
+                """
+                UPDATE hot_wheels_fandom_staging
+                SET
+                    raw_row = %s::jsonb,
+                    review_notes = %s,
+                    updated_at = NOW()
+                WHERE id = %s
+                RETURNING *
+                """,
+                (json.dumps(raw_row or {}), review_notes, item_id),
+            )
+        return cur.fetchone()
 
 
 def mark_hot_wheels_staging_imported(item_id, imported_car_id, review_notes=None):
@@ -1013,6 +1173,16 @@ def list_hot_wheels_staging_jobs(limit=20, offset=0):
             WITH job_rows AS (
                 SELECT
                     job_id,
+                    array_remove(
+                        array_agg(
+                            DISTINCT CASE
+                                WHEN NULLIF(COALESCE(raw_row->>'discovered_from', ''), '') IS NULL
+                                    THEN source_url
+                                ELSE raw_row->>'discovered_from'
+                            END
+                        ),
+                        NULL
+                    ) AS source_urls,
                     MAX(updated_at) AS latest_updated_at,
                     MIN(created_at) AS first_created_at,
                     COUNT(*) AS row_count,
@@ -1026,6 +1196,7 @@ def list_hot_wheels_staging_jobs(limit=20, offset=0):
             )
             SELECT
                 job_id,
+                source_urls,
                 latest_updated_at,
                 first_created_at,
                 row_count,
@@ -1050,6 +1221,22 @@ def list_hot_wheels_staging_jobs(limit=20, offset=0):
         "limit": limit,
         "offset": offset,
     }
+
+
+def delete_hot_wheels_staging_job(job_id):
+    conn = get_db_connection()
+
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            DELETE FROM hot_wheels_fandom_staging
+            WHERE job_id = %s
+            """,
+            (job_id,),
+        )
+        deleted_count = cur.rowcount
+
+    return deleted_count
 
 
 def hot_wheels_staging_has_job_id_column(conn=None):

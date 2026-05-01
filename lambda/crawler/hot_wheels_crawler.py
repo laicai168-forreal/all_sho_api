@@ -55,6 +55,10 @@ CORS_HEADERS = {
 }
 
 
+# ---------------------------------------------------------------------------
+# DB and platform helpers
+# ---------------------------------------------------------------------------
+
 def get_db_credentials():
     resp = secrets_client.get_secret_value(SecretId=SECRET_ARN)
     secret = json.loads(resp["SecretString"])
@@ -92,6 +96,10 @@ def safe_get(url, timeout=20):
     resp.raise_for_status()
     return resp
 
+
+# ---------------------------------------------------------------------------
+# Fandom URL and API helpers
+# ---------------------------------------------------------------------------
 
 def extract_fandom_page_name(url):
     parsed = urllib.parse.urlparse(url)
@@ -164,6 +172,10 @@ def fetch_fandom_api_json(url, params, timeout=20):
     return resp.json()
 
 
+# ---------------------------------------------------------------------------
+# Generic parsing helpers
+# ---------------------------------------------------------------------------
+
 def normalize_space(value):
     if value is None:
         return ""
@@ -210,6 +222,10 @@ def get_page_title(soup, fallback_title=None):
 
     return ""
 
+
+# ---------------------------------------------------------------------------
+# Table extraction and page-shape detection
+# ---------------------------------------------------------------------------
 
 def extract_table(table):
     headers = []
@@ -287,6 +303,10 @@ def parse_optional_year(value):
     return int(match.group(0))
 
 
+# ---------------------------------------------------------------------------
+# SKU resolution and staging-row builders
+# ---------------------------------------------------------------------------
+
 def _clean_stage_sku(value):
     if value is None:
         return None
@@ -295,7 +315,7 @@ def _clean_stage_sku(value):
     if not cleaned:
         return None
 
-    if cleaned.lower() in {"n/a", "na", "none", "-", "--", "tba", "unknown"}:
+    if cleaned.lower() in {"n/a", "na", "none", "-", "--", "?", "??", "tba", "unknown"}:
         return None
 
     return cleaned
@@ -336,7 +356,7 @@ def extract_stage_sku(row, sku_key):
     return _clean_stage_sku(row.get(sku_key))
 
 
-def build_temp_stage_sku(row, sku_key=None, context="row"):
+def build_temp_stage_sku(row, sku_key=None, context="row", stable_seed=None):
     raw_hints = [
         row.get(sku_key) if sku_key else None,
         row.get("toy_number"),
@@ -345,7 +365,8 @@ def build_temp_stage_sku(row, sku_key=None, context="row"):
         row.get("cast"),
     ]
     raw_hint = next((normalize_space(str(value)) for value in raw_hints if normalize_space(str(value or ""))), "")
-    suffix = uuid.uuid4().hex[:10]
+    stable_source = stable_seed or json.dumps(row or {}, sort_keys=True, ensure_ascii=True)
+    suffix = hashlib.sha1(stable_source.encode("utf-8")).hexdigest()[:10]
     if raw_hint:
         return f"TEMP-{context}-{suffix}-{re.sub(r'[^A-Z0-9]+', '-', raw_hint.upper()).strip('-')}"
     return f"TEMP-{context}-{suffix}"
@@ -386,6 +407,10 @@ def build_stage_row(
     }
 
 
+# ---------------------------------------------------------------------------
+# Page parsers
+# ---------------------------------------------------------------------------
+
 def parse_year_list_page(soup, source_url, page_title, raw_html_s3_key, job_id):
     release_year = extract_year_from_title(page_title)
     staged_rows = []
@@ -400,7 +425,21 @@ def parse_year_list_page(soup, source_url, page_title, raw_html_s3_key, job_id):
             continue
 
         for row in rows:
-            sku = extract_stage_sku(row, sku_key) or build_temp_stage_sku(row, sku_key, "year")
+            sku = extract_stage_sku(row, sku_key) or build_temp_stage_sku(
+                row,
+                sku_key,
+                "year",
+                stable_seed=json.dumps(
+                    {
+                        "source_url": source_url,
+                        "page_title": page_title,
+                        "title": row.get("model_name") or row.get("casting_name"),
+                        "row": row,
+                    },
+                    sort_keys=True,
+                    ensure_ascii=True,
+                ),
+            )
             title = row.get("model_name") or row.get("casting_name")
             if not sku or not title:
                 continue
@@ -439,7 +478,22 @@ def parse_series_sections_page(soup, source_url, page_title, raw_html_s3_key, jo
 
         section_name = extract_section_heading(table)
         for row in rows:
-            sku = extract_stage_sku(row, sku_key) or build_temp_stage_sku(row, sku_key, "series")
+            sku = extract_stage_sku(row, sku_key) or build_temp_stage_sku(
+                row,
+                sku_key,
+                "series",
+                stable_seed=json.dumps(
+                    {
+                        "source_url": source_url,
+                        "page_title": page_title,
+                        "section_name": section_name,
+                        "title": row.get("casting_name") or row.get("model_name"),
+                        "row": row,
+                    },
+                    sort_keys=True,
+                    ensure_ascii=True,
+                ),
+            )
             title = row.get("casting_name") or row.get("model_name")
             if not sku or not title:
                 continue
@@ -481,7 +535,21 @@ def parse_casting_page(soup, source_url, page_title, raw_html_s3_key, job_id, di
         section_name = extract_section_heading(table)
 
         for row in rows:
-            sku = extract_stage_sku(row, sku_key) or build_temp_stage_sku(row, sku_key, "cast")
+            sku = extract_stage_sku(row, sku_key) or build_temp_stage_sku(
+                row,
+                sku_key,
+                "cast",
+                stable_seed=json.dumps(
+                    {
+                        "source_url": source_url,
+                        "page_title": page_title,
+                        "section_name": section_name,
+                        "row": row,
+                    },
+                    sort_keys=True,
+                    ensure_ascii=True,
+                ),
+            )
 
             variation = dict(row)
             if section_name:
@@ -584,6 +652,10 @@ def parse_hot_wheels_page(url, html, job_id, page_title_override=None, discovere
     }
 
 
+# ---------------------------------------------------------------------------
+# Staging persistence helpers
+# ---------------------------------------------------------------------------
+
 def dedupe_stage_rows(items):
     deduped = {}
 
@@ -672,49 +744,112 @@ def upsert_stage_rows(conn, items):
             review_notes = EXCLUDED.review_notes,
             updated_at = now()
         """
+        # Override or re-crawl intentionally reopens the staging row for review
+        # by replacing the review status/notes with the newly parsed state.
+        #
+        # We intentionally do NOT update imported_car_id here. Once a staged row
+        # has been imported, that linked cars.id stays attached so later re-crawls
+        # and re-approvals continue to target the same live car row.
         execute_values(cur, sql, values)
         conn.commit()
 
     return len(items)
 
 
-def discover_category_member_urls(url):
+def casting_page_already_staged(conn, source_url):
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT EXISTS (
+                SELECT 1
+                FROM hot_wheels_fandom_staging
+                WHERE source_url = %s
+                  AND page_type = 'casting_page'
+            )
+            """,
+            (source_url,),
+        )
+        row = cur.fetchone()
+        return bool(row and row[0])
+
+
+# ---------------------------------------------------------------------------
+# Category discovery and crawl orchestration
+# ---------------------------------------------------------------------------
+
+def discover_category_member_targets(url):
     page_name = extract_fandom_page_name(url)
     if not is_category_page_name(page_name):
-        return []
+        return [], []
 
-    member_urls = []
-    continuation = None
-    seen_titles = set()
+    crawl_targets = []
+    category_summaries = []
+    pending_categories = [(page_name, url, None)]
+    seen_member_titles = set()
+    seen_categories = {page_name}
 
-    while True:
-        params = {
-            "action": "query",
-            "list": "categorymembers",
-            "cmtitle": page_name,
-            "cmnamespace": 0,
-            "cmlimit": "max",
-            "format": "json",
-            "formatversion": "2",
-        }
-        if continuation:
-            params["cmcontinue"] = continuation
+    # Hot Wheels category pages can point to other Category:* pages before they
+    # finally expose the casting pages we want. Walk category-to-category until
+    # we reach namespace-0 member pages, while tracking visited categories so a
+    # cyclical category graph cannot loop forever.
+    while pending_categories:
+        current_category, current_category_url, parent_category_url = pending_categories.pop(0)
+        continuation = None
+        discovered_count = 0
 
-        payload = fetch_fandom_api_json(url, params)
-        for member in (payload.get("query") or {}).get("categorymembers") or []:
-            title = normalize_space(member.get("title"))
-            if not title or title in seen_titles:
-                continue
-            if should_skip_category_member_title(title):
-                continue
-            seen_titles.add(title)
-            member_urls.append(build_fandom_page_url(url, title))
+        while True:
+            params = {
+                "action": "query",
+                "list": "categorymembers",
+                "cmtitle": current_category,
+                "cmlimit": "max",
+                "format": "json",
+                "formatversion": "2",
+            }
+            if continuation:
+                params["cmcontinue"] = continuation
 
-        continuation = ((payload.get("continue") or {}).get("cmcontinue"))
-        if not continuation:
-            break
+            payload = fetch_fandom_api_json(url, params)
+            for member in (payload.get("query") or {}).get("categorymembers") or []:
+                title = normalize_space(member.get("title"))
+                if not title or title in seen_member_titles:
+                    continue
+                if should_skip_category_member_title(title):
+                    continue
 
-    return member_urls
+                if is_category_page_name(title):
+                    if title not in seen_categories:
+                        seen_categories.add(title)
+                        pending_categories.append(
+                            (
+                                title,
+                                build_fandom_page_url(url, title),
+                                current_category_url,
+                            )
+                        )
+                    continue
+
+                seen_member_titles.add(title)
+                crawl_targets.append((build_fandom_page_url(url, title), current_category_url))
+                discovered_count += 1
+
+            continuation = ((payload.get("continue") or {}).get("cmcontinue"))
+            # Large year categories are paginated on the web UI via a "next"
+            # link. The MediaWiki API exposes the same pagination through
+            # cmcontinue, so keep following it until the category is exhausted.
+            if not continuation:
+                break
+
+        category_summaries.append(
+            {
+                "source_url": current_category_url,
+                "discovered_from": parent_category_url,
+                "page_type": "category_members",
+                "discovered_count": discovered_count,
+            }
+        )
+
+    return crawl_targets, category_summaries
 
 
 def crawl_page(url, job_id, log, discovered_from=None):
@@ -733,6 +868,10 @@ def crawl_page(url, job_id, log, discovered_from=None):
         return parse_hot_wheels_page(url, resp.text, job_id, discovered_from=discovered_from)
 
 
+# ---------------------------------------------------------------------------
+# Lambda entrypoint
+# ---------------------------------------------------------------------------
+
 def handler(event, context):
     if "body" in event and isinstance(event["body"], str):
         body = json.loads(event["body"])
@@ -740,6 +879,7 @@ def handler(event, context):
         body = event
 
     job_id = body.get("job_id") or f"hotwheels-{int(time.time())}"
+    override = bool(body.get("override"))
     one_month = 30 * 24 * 60 * 60
 
     def log(message):
@@ -776,16 +916,9 @@ def handler(event, context):
 
             if is_category_page_name(extract_fandom_page_name(page_url)):
                 try:
-                    member_urls = discover_category_member_urls(page_url)
-                    log(f"Discovered {len(member_urls)} casting pages from {page_url}")
-                    page_summaries.append(
-                        {
-                            "source_url": page_url,
-                            "page_type": "category_members",
-                            "discovered_count": len(member_urls),
-                        }
-                    )
-                    crawl_targets = [(member_url, page_url) for member_url in member_urls]
+                    crawl_targets, category_summaries = discover_category_member_targets(page_url)
+                    log(f"Discovered {len(crawl_targets)} casting pages from {page_url}")
+                    page_summaries.extend(category_summaries)
                 except Exception as exc:
                     log(f"Failed discovering category members for {page_url}: {exc}")
                     log(traceback.format_exc())
@@ -800,6 +933,23 @@ def handler(event, context):
 
             for target_url, discovered_from in crawl_targets:
                 try:
+                    if not override and casting_page_already_staged(conn, target_url):
+                        # Category crawls often rediscover the same casting page
+                        # across different year buckets. Skip it by default so
+                        # we do not restage the same casting repeatedly unless
+                        # an admin explicitly asks for an override refresh.
+                        log(f"Skipping already staged casting page {target_url}")
+                        page_summaries.append(
+                            {
+                                "source_url": target_url,
+                                "discovered_from": discovered_from,
+                                "page_type": "casting_page",
+                                "skipped": True,
+                                "reason": "already_staged",
+                            }
+                        )
+                        continue
+
                     result = crawl_page(target_url, job_id, log, discovered_from=discovered_from)
                     inserted_count = upsert_stage_rows(conn, result["rows"])
                     total_rows += inserted_count

@@ -122,6 +122,7 @@ export class LaicaiApiStack extends cdk.Stack {
 			dbSecret: dbSecret,
 			layer: commonLayer, // your existing lambda layer
 			profileImageBucket: profileImageBucket.bucket,
+			carImageBucket: crawlerBucket.bucket,
 		});
 
 		//////////////////////////////////////////////////////////////

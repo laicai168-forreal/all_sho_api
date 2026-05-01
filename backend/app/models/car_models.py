@@ -55,6 +55,10 @@ class CreateCarChangeRequestImageUploadRequest(BaseModel):
     contentType: str
 
 
+class CreateAdminCarImageFromUrlRequest(BaseModel):
+    imageUrl: str
+
+
 class HotWheelsStagingReviewRequest(BaseModel):
     reviewStatus: str
     reviewNotes: Optional[str] = None
@@ -65,3 +69,23 @@ class HotWheelsStagingBatchReviewRequest(BaseModel):
     reviewStatus: str
     reviewNotes: Optional[str] = None
     force: Optional[bool] = False
+
+
+class HotWheelsImageEnrichmentRequest(BaseModel):
+    itemIds: list[str]
+    limitPerItem: Optional[int] = 5
+    query: Optional[str] = None
+
+
+class HotWheelsImageCandidateReviewRequest(BaseModel):
+    candidateId: str
+    action: str
+
+
+class HotWheelsImageCandidateBatchReviewRequest(BaseModel):
+    candidateIds: list[str]
+    action: str
+
+
+class BrandVisibilityUpdateRequest(BaseModel):
+    isVisible: bool

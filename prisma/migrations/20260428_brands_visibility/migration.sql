@@ -1,0 +1,2 @@
+ALTER TABLE brands
+ADD COLUMN IF NOT EXISTS is_visible boolean NOT NULL DEFAULT TRUE;

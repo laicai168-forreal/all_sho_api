@@ -6,13 +6,18 @@ from fastapi import APIRouter, HTTPException, Query, Request
 
 from app.common.auth import get_current_user_sub
 from app.models.car_models import (
+    BrandVisibilityUpdateRequest,
     CarChangeRequestCreate,
     CarChangeRequestReview,
     CarChangeRequestUpdate,
+    CreateAdminCarImageFromUrlRequest,
     CreateCarChangeRequestImageUploadRequest,
     CarMutationRequest,
     CarDuplicateRequest,
     HotWheelsStagingBatchReviewRequest,
+    HotWheelsImageCandidateReviewRequest,
+    HotWheelsImageCandidateBatchReviewRequest,
+    HotWheelsImageEnrichmentRequest,
     HotWheelsStagingReviewRequest,
 )
 from app.services import car_service, profile_image_service
@@ -20,11 +25,17 @@ from app.services import car_service, profile_image_service
 router = APIRouter()
 
 
+@router.get("/brands")
+def list_public_brands():
+    return car_service.list_public_brands()
+
+
 @router.get("/cars")
 def get_cars(
     request: Request,
     cid: UUID | None = None,
     ownersOnly: bool = Query(False),
+    includeHidden: bool = Query(False),
     limit: int = 20,
     offset: int = 0,
     bid: str | None = None,
@@ -39,10 +50,10 @@ def get_cars(
     if ownersOnly:
         if not cid:
             raise HTTPException(status_code=400, detail="cid is required for owners lookup")
-        return car_service.list_public_car_owners(str(cid), limit=limit, offset=offset)
+        return car_service.list_public_car_owners(sub, str(cid), limit=limit, offset=offset, include_hidden=includeHidden)
 
     if cid:
-        return car_service.get_public_car_detail(sub, str(cid))
+        return car_service.get_public_car_detail(sub, str(cid), include_hidden=includeHidden)
 
     return car_service.list_public_cars(
         sub=sub,
@@ -50,13 +61,38 @@ def get_cars(
         keyword=keyword,
         limit=limit,
         offset=offset,
+        include_hidden=includeHidden,
     )
+
+
+@router.get("/admin/brands")
+def list_admin_brands(request: Request):
+    sub = get_current_user_sub(request)
+    return car_service.list_admin_brands(sub)
+
+
+@router.post("/admin/brands/{brand_id}/visibility")
+def update_admin_brand_visibility(request: Request, brand_id: UUID, body: BrandVisibilityUpdateRequest):
+    sub = get_current_user_sub(request)
+    return car_service.update_admin_brand_visibility(sub, str(brand_id), body.isVisible)
 
 
 @router.post("/admin/cars")
 def create_admin_car(request: Request, body: CarMutationRequest):
     sub = get_current_user_sub(request)
     return car_service.create_admin_car(sub, body.dict(exclude_none=True))
+
+
+@router.get("/admin/cars/{car_id}/neighbors")
+def get_admin_car_neighbors(request: Request, car_id: UUID):
+    sub = get_current_user_sub(request)
+    return car_service.get_admin_car_neighbors(sub, str(car_id))
+
+
+@router.post("/admin/cars/images/from-url")
+def create_admin_car_image_from_url(request: Request, body: CreateAdminCarImageFromUrlRequest):
+    sub = get_current_user_sub(request)
+    return car_service.create_admin_car_image_from_url(sub, body.imageUrl)
 
 
 @router.get("/admin/car-form-options")
@@ -119,6 +155,7 @@ def list_admin_hot_wheels_staging(
     pageType: str | None = None,
     keyword: str | None = None,
     jobId: str | None = None,
+    carImagesState: str | None = None,
     limit: int = 20,
     offset: int = 0,
 ):
@@ -131,6 +168,7 @@ def list_admin_hot_wheels_staging(
         page_type=pageType,
         keyword=keyword,
         job_id=jobId,
+        car_images_state=carImagesState,
         limit=limit,
         offset=offset,
     )
@@ -144,6 +182,12 @@ def list_admin_hot_wheels_staging_jobs(
 ):
     sub = get_current_user_sub(request)
     return car_service.list_hot_wheels_staging_jobs(sub, limit=limit, offset=offset)
+
+
+@router.delete("/admin/hot-wheels-staging/jobs/{job_id}")
+def delete_admin_hot_wheels_staging_job(request: Request, job_id: str):
+    sub = get_current_user_sub(request)
+    return car_service.delete_hot_wheels_staging_job(sub, job_id)
 
 
 @router.get("/admin/hot-wheels-staging/{item_id}")
@@ -180,6 +224,50 @@ def batch_review_admin_hot_wheels_staging(
         body.reviewStatus,
         body.reviewNotes,
         body.force,
+    )
+
+
+@router.post("/admin/hot-wheels-staging/images/enrich")
+def enrich_admin_hot_wheels_staging_images(
+    request: Request,
+    body: HotWheelsImageEnrichmentRequest,
+):
+    sub = get_current_user_sub(request)
+    return car_service.enrich_hot_wheels_staging_images(
+        sub,
+        body.itemIds,
+        body.limitPerItem or 5,
+        query_override=body.query,
+    )
+
+
+@router.post("/admin/hot-wheels-staging/{item_id}/images/review")
+def review_admin_hot_wheels_staging_image(
+    request: Request,
+    item_id: UUID,
+    body: HotWheelsImageCandidateReviewRequest,
+):
+    sub = get_current_user_sub(request)
+    return car_service.review_hot_wheels_image_candidate(
+        sub,
+        str(item_id),
+        body.candidateId,
+        body.action,
+    )
+
+
+@router.post("/admin/hot-wheels-staging/{item_id}/images/review/batch")
+def batch_review_admin_hot_wheels_staging_images(
+    request: Request,
+    item_id: UUID,
+    body: HotWheelsImageCandidateBatchReviewRequest,
+):
+    sub = get_current_user_sub(request)
+    return car_service.batch_review_hot_wheels_image_candidates(
+        sub,
+        str(item_id),
+        body.candidateIds,
+        body.action,
     )
 
 
