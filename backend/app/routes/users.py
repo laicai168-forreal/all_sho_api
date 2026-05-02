@@ -3,8 +3,8 @@
 from fastapi import APIRouter, Request, HTTPException
 from uuid import UUID
 from app.common.auth import get_current_user_sub, get_claims
-from app.services import profile_image_service, user_service
-from app.models.user_models import CreateProfileImageUploadRequest, PromoteUserRequest, UpdateUserRequest
+from app.services import message_service, profile_image_service, user_service
+from app.models.user_models import CreateProfileImageUploadRequest, PromoteUserRequest, SendDirectMessageRequest, UpdateUserRequest
 
 router = APIRouter()
 public_router = APIRouter()
@@ -40,7 +40,7 @@ def get_me(request: Request):
 def update_me(request: Request, body: UpdateUserRequest):
     sub = get_current_user_sub(request)
 
-    updated_rows = user_service.update_user_profile(sub, body.dict())
+    updated_rows = user_service.update_user_profile(sub, body.dict(exclude_unset=True))
 
     if not updated_rows:
         raise HTTPException(status_code=404, detail="User not found")
@@ -166,6 +166,93 @@ def unfollow_user(request: Request, user_id: UUID):
         return user_service.unfollow_user(sub, str(user_id))
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error))
+
+
+@router.post("/blocks/{user_id}")
+def block_user(request: Request, user_id: UUID):
+    sub = get_current_user_sub(request)
+
+    try:
+        return user_service.block_user(sub, str(user_id))
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error))
+
+
+@router.delete("/blocks/{user_id}")
+def unblock_user(request: Request, user_id: UUID):
+    sub = get_current_user_sub(request)
+
+    try:
+        return user_service.unblock_user(sub, str(user_id))
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error))
+
+
+@router.get("/messages/direct/{user_id}")
+def get_direct_conversation(
+    request: Request,
+    user_id: UUID,
+    limit: int = 30,
+    before: str | None = None,
+):
+    sub = get_current_user_sub(request)
+
+    try:
+        return message_service.get_direct_conversation(sub, str(user_id), limit=limit, before=before)
+    except ValueError as error:
+        raise HTTPException(status_code=404, detail=str(error))
+    except RuntimeError as error:
+        raise HTTPException(status_code=500, detail=str(error))
+
+
+@router.get("/messages/direct")
+def list_direct_conversations(request: Request):
+    sub = get_current_user_sub(request)
+
+    try:
+        return message_service.list_direct_conversations(sub)
+    except ValueError as error:
+        raise HTTPException(status_code=404, detail=str(error))
+    except RuntimeError as error:
+        raise HTTPException(status_code=500, detail=str(error))
+
+
+@router.post("/messages/socket-ticket")
+def create_message_socket_ticket(request: Request):
+    sub = get_current_user_sub(request)
+
+    try:
+        return message_service.create_socket_ticket(sub)
+    except ValueError as error:
+        raise HTTPException(status_code=404, detail=str(error))
+    except RuntimeError as error:
+        raise HTTPException(status_code=500, detail=str(error))
+
+
+@router.post("/messages/direct/{user_id}")
+def send_direct_message(request: Request, user_id: UUID, body: SendDirectMessageRequest):
+    sub = get_current_user_sub(request)
+
+    try:
+        return message_service.send_direct_message(sub, str(user_id), body.text)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error))
+    except PermissionError as error:
+        raise HTTPException(status_code=403, detail=str(error))
+    except RuntimeError as error:
+        raise HTTPException(status_code=500, detail=str(error))
+
+
+@router.post("/messages/direct/{user_id}/read")
+def mark_direct_conversation_read(request: Request, user_id: UUID):
+    sub = get_current_user_sub(request)
+
+    try:
+        return message_service.mark_direct_conversation_read(sub, str(user_id))
+    except ValueError as error:
+        raise HTTPException(status_code=404, detail=str(error))
+    except RuntimeError as error:
+        raise HTTPException(status_code=500, detail=str(error))
 
 
 @router.delete("/followers/{user_id}")

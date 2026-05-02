@@ -34,7 +34,7 @@ def get_user_by_sub(sub):
         return dict(zip(columns, row))
 
 
-def update_user(sub, bio, address, age, profile_image_url):
+def update_user(sub, bio, address, age, profile_image_url, message_notifications_muted):
     conn = get_db_connection()
     with conn.cursor() as cur:
         cur.execute(
@@ -43,10 +43,11 @@ def update_user(sub, bio, address, age, profile_image_url):
             SET bio = %s,
                 address = %s,
                 age = %s,
-                profile_image_url = %s
+                profile_image_url = %s,
+                message_notifications_muted = %s
             WHERE cognito_sub = %s
         """,
-            (bio, address, age, profile_image_url, sub),
+            (bio, address, age, profile_image_url, message_notifications_muted, sub),
         )
         updated_rows = cur.rowcount
 
@@ -151,6 +152,42 @@ def get_user_by_id(user_id):
 
         columns = [desc[0] for desc in cur.description]
         return dict(zip(columns, row))
+
+
+def get_users_by_ids(user_ids):
+    if not user_ids:
+        return {}
+
+    normalized_ids = []
+    for user_id in user_ids:
+        if not user_id:
+            continue
+        normalized_ids.append(str(user_id))
+
+    if not normalized_ids:
+        return {}
+
+    conn = get_db_connection()
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT id, username, profile_image_url, bio
+            FROM users
+            WHERE id = ANY(%s::uuid[])
+            """,
+            (normalized_ids,),
+        )
+        rows = cur.fetchall()
+
+    return {
+        str(row[0]): {
+            "id": str(row[0]),
+            "username": row[1],
+            "profile_image_url": row[2],
+            "bio": row[3],
+        }
+        for row in rows
+    }
 
 
 def get_public_profile(user_id, limit=12, offset=0):
@@ -292,10 +329,36 @@ def get_follow_status(follower_id, followed_user_id):
         )
         followed_by = cur.fetchone()[0]
 
+        cur.execute(
+            """
+            SELECT EXISTS(
+                SELECT 1
+                FROM user_blocks
+                WHERE blocker_id = %s AND blocked_user_id = %s
+            )
+            """,
+            (follower_id, followed_user_id),
+        )
+        blocking = cur.fetchone()[0]
+
+        cur.execute(
+            """
+            SELECT EXISTS(
+                SELECT 1
+                FROM user_blocks
+                WHERE blocker_id = %s AND blocked_user_id = %s
+            )
+            """,
+            (followed_user_id, follower_id),
+        )
+        blocked_by = cur.fetchone()[0]
+
     return {
         "following": following,
         "followedBy": followed_by,
-        "isFriend": following and followed_by,
+        "isFriend": following and followed_by and not blocking and not blocked_by,
+        "blocking": blocking,
+        "blockedBy": blocked_by,
     }
 
 
@@ -322,6 +385,41 @@ def unfollow_user(follower_id, followed_user_id):
             WHERE follower_id = %s AND followed_user_id = %s
             """,
             (follower_id, followed_user_id),
+        )
+    conn.commit()
+
+
+def block_user(blocker_id, blocked_user_id):
+    conn = get_db_connection()
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO user_blocks (blocker_id, blocked_user_id)
+            VALUES (%s, %s)
+            ON CONFLICT (blocker_id, blocked_user_id) DO NOTHING
+            """,
+            (blocker_id, blocked_user_id),
+        )
+        cur.execute(
+            """
+            DELETE FROM user_follows
+            WHERE (follower_id = %s AND followed_user_id = %s)
+               OR (follower_id = %s AND followed_user_id = %s)
+            """,
+            (blocker_id, blocked_user_id, blocked_user_id, blocker_id),
+        )
+    conn.commit()
+
+
+def unblock_user(blocker_id, blocked_user_id):
+    conn = get_db_connection()
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            DELETE FROM user_blocks
+            WHERE blocker_id = %s AND blocked_user_id = %s
+            """,
+            (blocker_id, blocked_user_id),
         )
     conn.commit()
 

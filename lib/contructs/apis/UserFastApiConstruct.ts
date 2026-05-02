@@ -6,9 +6,11 @@ import * as apigwv2 from "aws-cdk-lib/aws-apigatewayv2";
 import { HttpLambdaIntegration } from "aws-cdk-lib/aws-apigatewayv2-integrations";
 import * as ec2 from "aws-cdk-lib/aws-ec2";
 import * as rds from "aws-cdk-lib/aws-rds";
-import { Duration } from "aws-cdk-lib";
+import { Duration, Stack } from "aws-cdk-lib";
 import * as secret from "aws-cdk-lib/aws-secretsmanager";
 import * as s3 from "aws-cdk-lib/aws-s3";
+import * as dynamodb from "aws-cdk-lib/aws-dynamodb";
+import * as iam from "aws-cdk-lib/aws-iam";
 
 interface UserFastApiConstructProps {
     httpApi: apigwv2.HttpApi;
@@ -19,6 +21,9 @@ interface UserFastApiConstructProps {
     layer: lambda.LayerVersion;
     profileImageBucket: s3.IBucket;
     carImageBucket: s3.IBucket;
+    userMessagingTable: dynamodb.ITable;
+    messagingWebSocketUrl: string;
+    messagingWebSocketCallbackUrl: string;
 }
 
 export class UserFastApiConstruct extends Construct {
@@ -27,7 +32,19 @@ export class UserFastApiConstruct extends Construct {
     constructor(scope: Construct, id: string, props: UserFastApiConstructProps) {
         super(scope, id);
 
-        const { httpApi, authorizer, vpc, rds, dbSecret, layer, profileImageBucket, carImageBucket } = props;
+        const {
+            httpApi,
+            authorizer,
+            vpc,
+            rds,
+            dbSecret,
+            layer,
+            profileImageBucket,
+            carImageBucket,
+            userMessagingTable,
+            messagingWebSocketUrl,
+            messagingWebSocketCallbackUrl,
+        } = props;
 
         // Lambda
         this.function = new lambda.Function(this, "UserFastApiFn", {
@@ -42,6 +59,9 @@ export class UserFastApiConstruct extends Construct {
                 DB_NAME: "carsdb",
                 PROFILE_IMAGE_BUCKET: profileImageBucket.bucketName,
                 CAR_IMAGE_BUCKET: carImageBucket.bucketName,
+                USER_MESSAGING_TABLE: userMessagingTable.tableName,
+                MESSAGING_WS_URL: messagingWebSocketUrl,
+                MESSAGING_WS_CALLBACK_URL: messagingWebSocketCallbackUrl,
                 BRAVE_SEARCH_API_KEY: process.env.BRAVE_SEARCH_API_KEY || "",
             },
         });
@@ -54,6 +74,14 @@ export class UserFastApiConstruct extends Construct {
         rds.connections.allowDefaultPortFrom(this.function);
         profileImageBucket.grantReadWrite(this.function);
         carImageBucket.grantReadWrite(this.function);
+        userMessagingTable.grantReadWriteData(this.function);
+        const stack = Stack.of(this);
+        this.function.addToRolePolicy(new iam.PolicyStatement({
+            actions: ["execute-api:ManageConnections"],
+            resources: [
+                `arn:aws:execute-api:${stack.region}:${stack.account}:*/*/@connections/*`,
+            ],
+        }));
 
         const integration = new HttpLambdaIntegration(
             "UserFastApiIntegration",

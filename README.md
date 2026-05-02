@@ -33,6 +33,56 @@ cd ..
 * `npx cdk diff`    compare deployed stack with current state
 * `npx cdk synth`   emits the synthesized CloudFormation template
 
+## Messaging Architecture Notes
+
+The collector-to-collector messaging feature now uses a hybrid design:
+
+- FastAPI HTTP endpoints for authenticated inbox, thread, send, read, and websocket ticket APIs
+- a single DynamoDB table for message storage, inbox summaries, rate-limit counters, websocket connections, and one-time socket tickets
+- an API Gateway WebSocket API for realtime delivery
+
+### Current message flow
+
+1. The frontend loads inbox and thread data through FastAPI.
+2. The frontend requests a one-time websocket ticket from the authenticated HTTP API.
+3. The websocket connect Lambda validates the ticket and stores live connection records in DynamoDB.
+4. When a message is sent, the backend persists it to DynamoDB first.
+5. The backend then performs best-effort websocket fanout to the recipient's active connections.
+6. Inbox unread counts and thread read markers are also stored in DynamoDB.
+
+### Single-table record groups
+
+The messaging table uses `pk` and `sk` with several record shapes:
+
+- `CONV#... / META`
+  - conversation summary and request-lock state
+- `CONV#... / MSG#...`
+  - actual message rows
+- `USER#... / CONV#...`
+  - per-user inbox summaries and unread counts
+- `USER#... / WS#...`
+  - active websocket connection records
+- `CONN#... / META`
+  - reverse lookup for disconnect cleanup
+- `TICKET#... / META`
+  - one-time websocket ticket records
+- `RATE#... / ...`
+  - lightweight anti-spam counters
+
+### Pre-production safeguards
+
+Before production, the messaging service now includes:
+
+- paged thread loading instead of fetching the full conversation at once
+- best-effort websocket delivery so persistence does not fail when fanout fails
+- websocket retry limits instead of endless reconnect loops on the client
+- backend-enforced rate limits for message bursts and new intro requests
+- message length limit of `500` characters
+
+### Deferred work
+
+Transaction-context messaging remains intentionally deferred for a later phase. The current system is designed so a later selling-post context can be layered on top of the existing direct-message flow instead of creating a separate message stack.
+
 ## PostgreSQL Full-Text Search Setup for `cars` Table
 
 ### 1. Trigger Function

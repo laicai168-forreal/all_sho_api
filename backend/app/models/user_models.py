@@ -10,6 +10,7 @@ class UpdateUserRequest(BaseModel):
     age: Optional[int] = None
     profileImageUrl: Optional[str] = None
     pendingProfileImageKey: Optional[str] = None
+    messageNotificationsMuted: Optional[bool] = None
 
 
 class PromoteUserRequest(BaseModel):
@@ -20,3 +21,11 @@ class PromoteUserRequest(BaseModel):
 class CreateProfileImageUploadRequest(BaseModel):
     fileName: str
     contentType: str
+
+
+class SendDirectMessageRequest(BaseModel):
+    text: str
+
+
+class CreateMessageSocketTicketRequest(BaseModel):
+    pass

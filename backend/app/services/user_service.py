@@ -29,6 +29,7 @@ def get_user_profile(sub, claims):
     user["email"] = claims.get("email")
     user["phone_number"] = claims.get("phone_number")
     user["role"] = user.get("role") or "customer"
+    user["message_notifications_muted"] = bool(user.get("message_notifications_muted"))
 
     return user
 
@@ -47,15 +48,25 @@ def update_user_profile(sub, data):
             pending_profile_image_key,
             profile_image_url,
         )
-    elif data.get("profileImageUrl") is not None:
+    elif "profileImageUrl" in data:
         profile_image_url = data.get("profileImageUrl")
+
+    bio = data.get("bio") if "bio" in data else current_user.get("bio")
+    address = data.get("address") if "address" in data else current_user.get("address")
+    age = data.get("age") if "age" in data else current_user.get("age")
+    message_notifications_muted = (
+        data.get("messageNotificationsMuted")
+        if "messageNotificationsMuted" in data
+        else current_user.get("message_notifications_muted")
+    )
 
     return user_repository.update_user(
         sub,
-        data.get("bio"),
-        data.get("address"),
-        data.get("age"),
+        bio,
+        address,
+        age,
         profile_image_url,
+        bool(message_notifications_muted),
     )
 
 
@@ -126,7 +137,7 @@ def get_follow_status(actor_sub, target_user_id):
     return user_repository.get_follow_status(actor["id"], target_user_id)
 
 
-def follow_user(actor_sub, target_user_id):
+def _get_relationship_status_or_raise(actor_sub, target_user_id):
     actor = user_repository.get_user_by_sub(actor_sub)
     if not actor:
         raise ValueError("Viewer not found")
@@ -135,26 +146,52 @@ def follow_user(actor_sub, target_user_id):
     if not target_user:
         raise ValueError("User not found")
 
+    return actor, target_user, user_repository.get_follow_status(actor["id"], target_user_id)
+
+
+def follow_user(actor_sub, target_user_id):
+    actor, _, relationship = _get_relationship_status_or_raise(actor_sub, target_user_id)
+
     if actor["id"] == target_user_id:
         raise ValueError("You cannot follow yourself")
+
+    if relationship["blocking"]:
+        raise ValueError("You have blocked this user. Unblock them before following again.")
+
+    if relationship["blockedBy"]:
+        raise ValueError("You cannot follow a user who has blocked you.")
 
     user_repository.follow_user(actor["id"], target_user_id)
     return user_repository.get_follow_status(actor["id"], target_user_id)
 
 
 def unfollow_user(actor_sub, target_user_id):
-    actor = user_repository.get_user_by_sub(actor_sub)
-    if not actor:
-        raise ValueError("Viewer not found")
-
-    target_user = user_repository.get_user_by_id(target_user_id)
-    if not target_user:
-        raise ValueError("User not found")
+    actor, _, _ = _get_relationship_status_or_raise(actor_sub, target_user_id)
 
     if actor["id"] == target_user_id:
         raise ValueError("You cannot unfollow yourself")
 
     user_repository.unfollow_user(actor["id"], target_user_id)
+    return user_repository.get_follow_status(actor["id"], target_user_id)
+
+
+def block_user(actor_sub, target_user_id):
+    actor, _, _ = _get_relationship_status_or_raise(actor_sub, target_user_id)
+
+    if actor["id"] == target_user_id:
+        raise ValueError("You cannot block yourself")
+
+    user_repository.block_user(actor["id"], target_user_id)
+    return user_repository.get_follow_status(actor["id"], target_user_id)
+
+
+def unblock_user(actor_sub, target_user_id):
+    actor, _, _ = _get_relationship_status_or_raise(actor_sub, target_user_id)
+
+    if actor["id"] == target_user_id:
+        raise ValueError("You cannot unblock yourself")
+
+    user_repository.unblock_user(actor["id"], target_user_id)
     return user_repository.get_follow_status(actor["id"], target_user_id)
 
 

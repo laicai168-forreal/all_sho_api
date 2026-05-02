@@ -5,10 +5,12 @@ import { CrawlerHelperApiConstruct } from './contructs/apis/CrawlerApiConstruct'
 import { CrawlerLoggingConstruct } from './contructs/apis/CrawlerLoggingConstruct';
 import { HttpApiConstruct } from './contructs/apis/HttpApiConstruct';
 import { UserFastApiConstruct } from './contructs/apis/UserFastApiConstruct';
+import { UserMessagingRealtimeConstruct } from './contructs/apis/UserMessagingRealtimeConstruct';
 import { ImageResizeCfnConstruct } from './contructs/cloudFront/ImageResizeCfnConstruct';
 import { CarsDynamoConstruct } from './contructs/dynamos/CarsDynamoConstruct';
 import { LikeCollectionDynamoConstruct } from './contructs/dynamos/LikeCollectionDynamoConstruct';
 import { UserCollectionDynamoConstruct } from './contructs/dynamos/UserCollectionDynamoConstruct';
+import { UserMessagingDynamoConstruct } from './contructs/dynamos/UserMessagingDynamoConstruct';
 import { AddCollectionConstruct } from './contructs/lambdas/collections/AddCollectionConstruct';
 import { DeleteCollectionConstruct } from './contructs/lambdas/collections/DeleteCollectionConstruct';
 import { DislikeCollectionConstruct } from './contructs/lambdas/collections/DislikeCollectionConstruct';
@@ -54,6 +56,10 @@ export class LaicaiApiStack extends cdk.Stack {
 		// User collection stack
 		const userItemTable = new UserCollectionDynamoConstruct(this, 'UserItemTable');
 		const likeItemTable = new LikeCollectionDynamoConstruct(this, 'LikeItemTable');
+		const userMessagingTable = new UserMessagingDynamoConstruct(this, 'UserMessagingTable');
+		const messagingRealtime = new UserMessagingRealtimeConstruct(this, 'UserMessagingRealtime', {
+			userMessagingTable: userMessagingTable.table,
+		});
 		const { function: addCollectionFunction } = new AddCollectionConstruct(this, 'UCAdd', { carRDSInstance, secret: dbSecret, vpc: carsVpc });
 		const { function: getCollectionFunction } = new GetCollectionConstruct(this, 'UCGet', { carRDSInstance, secret: dbSecret, vpc: carsVpc });
 		const { function: deleteCollectionFunction } = new DeleteCollectionConstruct(this, 'UCDelete', { carRDSInstance, secret: dbSecret, vpc: carsVpc });
@@ -123,6 +129,9 @@ export class LaicaiApiStack extends cdk.Stack {
 			layer: commonLayer, // your existing lambda layer
 			profileImageBucket: profileImageBucket.bucket,
 			carImageBucket: crawlerBucket.bucket,
+			userMessagingTable: userMessagingTable.table,
+			messagingWebSocketUrl: messagingRealtime.stage.url,
+			messagingWebSocketCallbackUrl: messagingRealtime.stage.callbackUrl,
 		});
 
 		//////////////////////////////////////////////////////////////
