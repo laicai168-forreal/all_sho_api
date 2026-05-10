@@ -27,5 +27,14 @@ class SendDirectMessageRequest(BaseModel):
     text: str
 
 
+class UpdateTransactionConversationStatusRequest(BaseModel):
+    transactionStatus: str
+
+
+class CreateTransactionReviewRequest(BaseModel):
+    rating: int
+    comment: str
+
+
 class CreateMessageSocketTicketRequest(BaseModel):
     pass

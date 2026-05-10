@@ -4,7 +4,14 @@ from fastapi import APIRouter, Request, HTTPException
 from uuid import UUID
 from app.common.auth import get_current_user_sub, get_claims
 from app.services import message_service, profile_image_service, user_service
-from app.models.user_models import CreateProfileImageUploadRequest, PromoteUserRequest, SendDirectMessageRequest, UpdateUserRequest
+from app.models.user_models import (
+    CreateProfileImageUploadRequest,
+    CreateTransactionReviewRequest,
+    PromoteUserRequest,
+    SendDirectMessageRequest,
+    UpdateTransactionConversationStatusRequest,
+    UpdateUserRequest,
+)
 
 router = APIRouter()
 public_router = APIRouter()
@@ -138,6 +145,18 @@ def get_public_following(
     return result
 
 
+@public_router.get("/profiles/{user_id}/reviews")
+def get_public_reviews(
+    user_id: UUID,
+    limit: int = 10,
+    offset: int = 0,
+):
+    result = user_service.get_public_reviews(str(user_id), limit=limit, offset=offset)
+    if result is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    return result
+
+
 @router.get("/follows/{user_id}")
 def get_follow_status(request: Request, user_id: UUID):
     sub = get_current_user_sub(request)
@@ -217,6 +236,28 @@ def list_direct_conversations(request: Request):
         raise HTTPException(status_code=500, detail=str(error))
 
 
+@router.get("/orders/history")
+def list_order_history(
+    request: Request,
+    role: str = "selling",
+    limit: int = 20,
+    offset: int = 0,
+):
+    sub = get_current_user_sub(request)
+
+    try:
+        return message_service.list_showroom_transaction_history(
+            sub,
+            role=role,
+            limit=limit,
+            offset=offset,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error))
+    except RuntimeError as error:
+        raise HTTPException(status_code=500, detail=str(error))
+
+
 @router.post("/messages/socket-ticket")
 def create_message_socket_ticket(request: Request):
     sub = get_current_user_sub(request)
@@ -251,6 +292,119 @@ def mark_direct_conversation_read(request: Request, user_id: UUID):
         return message_service.mark_direct_conversation_read(sub, str(user_id))
     except ValueError as error:
         raise HTTPException(status_code=404, detail=str(error))
+    except RuntimeError as error:
+        raise HTTPException(status_code=500, detail=str(error))
+
+
+@router.get("/messages/showroom/{post_id}/{user_id}")
+def get_showroom_transaction_conversation(
+    request: Request,
+    post_id: UUID,
+    user_id: UUID,
+    limit: int = 30,
+    before: str | None = None,
+):
+    sub = get_current_user_sub(request)
+
+    try:
+        return message_service.get_showroom_transaction_conversation(
+            sub,
+            str(user_id),
+            str(post_id),
+            limit=limit,
+            before=before,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=404, detail=str(error))
+    except PermissionError as error:
+        raise HTTPException(status_code=403, detail=str(error))
+    except RuntimeError as error:
+        raise HTTPException(status_code=500, detail=str(error))
+
+
+@router.post("/messages/showroom/{post_id}/{user_id}")
+def send_showroom_transaction_message(
+    request: Request,
+    post_id: UUID,
+    user_id: UUID,
+    body: SendDirectMessageRequest,
+):
+    sub = get_current_user_sub(request)
+
+    try:
+        return message_service.send_showroom_transaction_message(
+            sub,
+            str(user_id),
+            str(post_id),
+            body.text,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error))
+    except PermissionError as error:
+        raise HTTPException(status_code=403, detail=str(error))
+    except RuntimeError as error:
+        raise HTTPException(status_code=500, detail=str(error))
+
+
+@router.post("/messages/showroom/{post_id}/{user_id}/read")
+def mark_showroom_transaction_read(request: Request, post_id: UUID, user_id: UUID):
+    sub = get_current_user_sub(request)
+
+    try:
+        return message_service.mark_showroom_transaction_read(sub, str(user_id), str(post_id))
+    except ValueError as error:
+        raise HTTPException(status_code=404, detail=str(error))
+    except PermissionError as error:
+        raise HTTPException(status_code=403, detail=str(error))
+    except RuntimeError as error:
+        raise HTTPException(status_code=500, detail=str(error))
+
+
+@router.post("/messages/showroom/{post_id}/{user_id}/status")
+def update_showroom_transaction_status(
+    request: Request,
+    post_id: UUID,
+    user_id: UUID,
+    body: UpdateTransactionConversationStatusRequest,
+):
+    sub = get_current_user_sub(request)
+
+    try:
+        return message_service.update_showroom_transaction_status(
+            sub,
+            str(user_id),
+            str(post_id),
+            body.transactionStatus,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error))
+    except PermissionError as error:
+        raise HTTPException(status_code=403, detail=str(error))
+    except RuntimeError as error:
+        raise HTTPException(status_code=500, detail=str(error))
+
+
+@router.post("/messages/showroom/{post_id}/{user_id}/review")
+def create_showroom_transaction_review(
+    request: Request,
+    post_id: UUID,
+    user_id: UUID,
+    body: CreateTransactionReviewRequest,
+):
+    sub = get_current_user_sub(request)
+
+    try:
+        return message_service.create_showroom_transaction_review(
+            sub,
+            str(user_id),
+            str(post_id),
+            body.rating,
+            body.comment,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error))
+    except PermissionError as error:
+        raise HTTPException(status_code=403, detail=str(error))
     except RuntimeError as error:
         raise HTTPException(status_code=500, detail=str(error))
 

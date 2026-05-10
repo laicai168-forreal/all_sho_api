@@ -10,6 +10,7 @@ import requests
 s3_client = boto3.client("s3")
 
 PROFILE_IMAGE_BUCKET = os.environ["PROFILE_IMAGE_BUCKET"]
+SHOWROOM_IMAGE_BUCKET = os.environ.get("SHOWROOM_IMAGE_BUCKET", PROFILE_IMAGE_BUCKET)
 CAR_IMAGE_BUCKET = os.environ.get("CAR_IMAGE_BUCKET", PROFILE_IMAGE_BUCKET)
 
 
@@ -30,6 +31,11 @@ def build_profile_image_url(object_key: str) -> str:
 def _build_bucket_file_url(object_key: str) -> str:
     region = _get_bucket_region()
     return f"https://{PROFILE_IMAGE_BUCKET}.s3.{region}.amazonaws.com/{object_key}"
+
+
+def _build_showroom_file_url(object_key: str) -> str:
+    region = _get_bucket_region()
+    return f"https://{SHOWROOM_IMAGE_BUCKET}.s3.{region}.amazonaws.com/{object_key}"
 
 
 def _build_car_image_file_url(object_key: str) -> str:
@@ -56,6 +62,25 @@ def _create_presigned_image_upload(object_key: str, content_type: str):
     }
 
 
+def _create_presigned_showroom_image_upload(object_key: str, content_type: str):
+    upload_url = s3_client.generate_presigned_url(
+        "put_object",
+        Params={
+            "Bucket": SHOWROOM_IMAGE_BUCKET,
+            "Key": object_key,
+            "ContentType": content_type,
+        },
+        ExpiresIn=900,
+        HttpMethod="PUT",
+    )
+
+    return {
+        "uploadUrl": upload_url,
+        "objectKey": object_key,
+        "fileUrl": _build_showroom_file_url(object_key),
+    }
+
+
 def create_profile_image_upload(sub: str, file_name: str, content_type: str):
     object_key = f"profile-images/{sub}/{uuid.uuid4()}-{_sanitize_file_name(file_name)}"
     result = _create_presigned_image_upload(object_key, content_type)
@@ -66,6 +91,90 @@ def create_profile_image_upload(sub: str, file_name: str, content_type: str):
 def create_car_change_request_image_upload(sub: str, file_name: str, content_type: str):
     object_key = f"car-change-requests/{sub}/{uuid.uuid4()}-{_sanitize_file_name(file_name)}"
     return _create_presigned_image_upload(object_key, content_type)
+
+
+def create_showroom_image_upload(sub: str, file_name: str, content_type: str):
+    object_key = f"showroom-images-temp/{sub}/{uuid.uuid4()}-{_sanitize_file_name(file_name)}"
+    return _create_presigned_showroom_image_upload(object_key, content_type)
+
+
+def confirm_showroom_images(sub: str, post_id: str, images: list[dict]):
+    confirmed_images = []
+    expected_prefix = f"showroom-images-temp/{sub}/"
+
+    for index, image in enumerate(images):
+        pending_key = image.get("objectKey") or image.get("object_key")
+        file_name = image.get("fileName") or image.get("file_name") or f"image-{index + 1}.jpg"
+        if not pending_key or not pending_key.startswith(expected_prefix):
+            raise ValueError("Invalid showroom image key")
+
+        head = s3_client.head_object(Bucket=SHOWROOM_IMAGE_BUCKET, Key=pending_key)
+        content_type = head.get("ContentType", "application/octet-stream")
+        final_key = f"showroom-images/{post_id}/{uuid.uuid4()}-{_sanitize_file_name(file_name)}"
+
+        s3_client.copy_object(
+            Bucket=SHOWROOM_IMAGE_BUCKET,
+            CopySource={"Bucket": SHOWROOM_IMAGE_BUCKET, "Key": pending_key},
+            Key=final_key,
+            ContentType=content_type,
+            MetadataDirective="REPLACE",
+        )
+        s3_client.delete_object(Bucket=SHOWROOM_IMAGE_BUCKET, Key=pending_key)
+
+        confirmed_images.append({
+            "objectKey": final_key,
+            "fileUrl": _build_showroom_file_url(final_key),
+            "sortOrder": image.get("sortOrder", index),
+        })
+
+    return confirmed_images
+
+
+def resolve_showroom_images(sub: str, post_id: str, images: list[dict]):
+    resolved_images = []
+    temp_prefix = f"showroom-images-temp/{sub}/"
+    final_prefix = f"showroom-images/{post_id}/"
+
+    for index, image in enumerate(images):
+        object_key = image.get("objectKey") or image.get("object_key")
+        file_name = image.get("fileName") or image.get("file_name") or f"image-{index + 1}.jpg"
+        sort_order = image.get("sortOrder", index)
+
+        if not object_key:
+            raise ValueError("Invalid showroom image key")
+
+        if object_key.startswith(final_prefix):
+            resolved_images.append({
+                "objectKey": object_key,
+                "fileUrl": _build_showroom_file_url(object_key),
+                "sortOrder": sort_order,
+            })
+            continue
+
+        if object_key.startswith(temp_prefix):
+            head = s3_client.head_object(Bucket=SHOWROOM_IMAGE_BUCKET, Key=object_key)
+            content_type = head.get("ContentType", "application/octet-stream")
+            final_key = f"showroom-images/{post_id}/{uuid.uuid4()}-{_sanitize_file_name(file_name)}"
+
+            s3_client.copy_object(
+                Bucket=SHOWROOM_IMAGE_BUCKET,
+                CopySource={"Bucket": SHOWROOM_IMAGE_BUCKET, "Key": object_key},
+                Key=final_key,
+                ContentType=content_type,
+                MetadataDirective="REPLACE",
+            )
+            s3_client.delete_object(Bucket=SHOWROOM_IMAGE_BUCKET, Key=object_key)
+
+            resolved_images.append({
+                "objectKey": final_key,
+                "fileUrl": _build_showroom_file_url(final_key),
+                "sortOrder": sort_order,
+            })
+            continue
+
+        raise ValueError("Invalid showroom image key")
+
+    return resolved_images
 
 
 def promote_car_change_request_image(file_url: str) -> str:

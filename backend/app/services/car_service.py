@@ -67,7 +67,7 @@ def _can_include_hidden_brands(sub, include_hidden):
     return bool(user and user.get("role") == "admin")
 
 
-def list_public_cars(sub, bid=None, keyword=None, limit=20, offset=0, include_hidden=False):
+def list_public_cars(sub, bid=None, keyword=None, car_images_state=None, limit=20, offset=0, include_hidden=False):
     # Preserve the legacy `/cars` list contract while moving execution into the
     # FastAPI stack. The response still includes brand metadata because the
     # cars page depends on it for filter dropdowns.
@@ -79,6 +79,7 @@ def list_public_cars(sub, bid=None, keyword=None, limit=20, offset=0, include_hi
         # Hidden brands are excluded from normal `/cars` reads. Admin surfaces
         # may opt into them explicitly through `includeHidden=true`.
         filters.append("COALESCE(b.is_visible, TRUE) = TRUE")
+        filters.append("COALESCE(c.is_visible, TRUE) = TRUE")
 
     if bid:
         filters.append("b.id = %s")
@@ -87,6 +88,23 @@ def list_public_cars(sub, bid=None, keyword=None, limit=20, offset=0, include_hi
     if keyword:
         filters.append("c.search_vector @@ plainto_tsquery(%s)")
         values.append(keyword)
+
+    if car_images_state == "has_images":
+        filters.append(
+            """
+            jsonb_typeof(COALESCE(c.images, '[]'::jsonb)) = 'array'
+            AND jsonb_array_length(COALESCE(c.images, '[]'::jsonb)) > 0
+            """
+        )
+    elif car_images_state == "no_images":
+        filters.append(
+            """
+            (
+                jsonb_typeof(COALESCE(c.images, '[]'::jsonb)) <> 'array'
+                OR jsonb_array_length(COALESCE(c.images, '[]'::jsonb)) = 0
+            )
+            """
+        )
 
     result = car_repository.list_public_cars(
         filters=filters,

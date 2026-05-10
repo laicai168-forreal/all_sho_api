@@ -27,6 +27,7 @@ import { CommonLayerConstruct } from './contructs/layers/CommonLayerConstruct';
 import { CarsRDSInstanceConstruct } from './contructs/rds/CarsRDSInstanceConstruct';
 import { CrawlerBucketConstruct } from './contructs/s3/crawlerBucket';
 import { ProfileImageBucketConstruct } from './contructs/s3/ProfileImageBucketConstruct';
+import { ShowroomImageBucketConstruct } from './contructs/s3/ShowroomImageBucketConstruct';
 import { CarsDataVpcConstruct } from './contructs/vpc/CarsDataVpcConstruct';
 
 export class LaicaiApiStack extends cdk.Stack {
@@ -117,6 +118,7 @@ export class LaicaiApiStack extends cdk.Stack {
 
 		// User constructs
 		const profileImageBucket = new ProfileImageBucketConstruct(this, 'ProfileImageBucket');
+		const showroomImageBucket = new ShowroomImageBucketConstruct(this, 'ShowroomImageBucket');
 
 		////////////////////////////////////////////////////
 		// Backend API stack with FastAPI, will use the same authorizer and http api as the user collection stack, and connect to the same RDS instance, but in a different lambda function, which is more flexible for future development
@@ -128,6 +130,7 @@ export class LaicaiApiStack extends cdk.Stack {
 			dbSecret: dbSecret,
 			layer: commonLayer, // your existing lambda layer
 			profileImageBucket: profileImageBucket.bucket,
+			showroomImageBucket: showroomImageBucket.bucket,
 			carImageBucket: crawlerBucket.bucket,
 			userMessagingTable: userMessagingTable.table,
 			messagingWebSocketUrl: messagingRealtime.stage.url,

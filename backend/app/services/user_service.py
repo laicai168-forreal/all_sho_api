@@ -1,6 +1,6 @@
 # app/services/user_service.py
 
-from app.repositories import user_repository
+from app.repositories import showroom_repository, user_repository
 from app.services import profile_image_service
 
 
@@ -122,7 +122,32 @@ def delete_user(actor_sub, target_user_id):
 
 
 def get_public_profile(target_user_id, limit=12, offset=0):
-    return user_repository.get_public_profile(target_user_id, limit=limit, offset=offset)
+    profile = user_repository.get_public_profile(target_user_id, limit=limit, offset=offset)
+    if not profile:
+        return None
+
+    profile["reviews"] = {
+        "summary": showroom_repository.get_user_review_summary(target_user_id),
+        "items": showroom_repository.list_recent_user_reviews(target_user_id, limit=5),
+    }
+    return profile
+
+
+def get_public_reviews(target_user_id, limit=10, offset=0):
+    target_user = user_repository.get_user_by_id(target_user_id)
+    if not target_user:
+        return None
+
+    safe_limit = min(max(limit or 10, 1), 20)
+    safe_offset = max(offset or 0, 0)
+    summary = showroom_repository.get_user_review_summary(target_user_id)
+    return {
+        "summary": summary,
+        "items": showroom_repository.list_recent_user_reviews(target_user_id, limit=safe_limit, offset=safe_offset),
+        "total": summary.get("totalReviews", 0),
+        "limit": safe_limit,
+        "offset": safe_offset,
+    }
 
 
 def get_follow_status(actor_sub, target_user_id):

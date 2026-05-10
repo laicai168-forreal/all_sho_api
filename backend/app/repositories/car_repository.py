@@ -28,6 +28,7 @@ ALLOWED_CAR_FIELDS = {
     "make_ai": "make_ai",
     "model_ai": "model_ai",
     "source_url": "source_url",
+    "is_visible": "is_visible",
     "is_chase": "is_chase",
     "is_limited": "is_limited",
     "limited_pieces": "limited_pieces",
@@ -281,7 +282,7 @@ def get_public_car_detail(car_id, user_id=None, include_hidden=False):
         user_join = "LEFT JOIN user_liked_items uli ON false"
 
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
-        hidden_filter = "" if include_hidden else "AND COALESCE(b.is_visible, TRUE) = TRUE"
+        hidden_filter = "" if include_hidden else "AND COALESCE(b.is_visible, TRUE) = TRUE AND COALESCE(c.is_visible, TRUE) = TRUE"
         cur.execute(
             f"""
             {CAR_STATS_CTE}
@@ -301,6 +302,7 @@ def get_public_car_detail(car_id, user_id=None, include_hidden=False):
                 c.crawled_date,
                 c.image_url,
                 c.images,
+                COALESCE(c.is_visible, TRUE) AS is_visible,
                 c.additional_info,
                 {own_expr} AS own,
                 {liked_expr} AS liked,
@@ -377,6 +379,7 @@ def list_public_cars(filters=None, values=None, user_id=None, limit=20, offset=0
                 c.source_url,
                 c.crawled_date,
                 c.images,
+                COALESCE(c.is_visible, TRUE) AS is_visible,
                 {own_expr} AS own,
                 {liked_expr} AS liked,
                 COALESCE(cs.owners_count, 0) AS owners_count,
@@ -492,6 +495,7 @@ def list_brands(include_hidden=True, include_counts=False, only_with_cars=False)
                 SELECT brand_id, COUNT(*)::int AS car_count
                 FROM cars
                 WHERE brand_id IS NOT NULL
+                  AND COALESCE(is_visible, TRUE) = TRUE
                 GROUP BY brand_id
             ) car_counts ON car_counts.brand_id = b.id
             {where_clause}
@@ -693,6 +697,7 @@ def duplicate_car(source_car_id, actor_user_id, overrides=None):
         "make_ai": overrides.get("make_ai", source.get("make_ai")),
         "model_ai": overrides.get("model_ai", source.get("model_ai")),
         "source_url": overrides.get("source_url", source.get("source_url")),
+        "is_visible": overrides.get("is_visible", source.get("is_visible")),
         "is_chase": overrides.get("is_chase", source.get("is_chase")),
         "is_limited": overrides.get("is_limited", source.get("is_limited")),
         "limited_pieces": overrides.get("limited_pieces", source.get("limited_pieces")),

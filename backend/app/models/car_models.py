@@ -22,6 +22,7 @@ class CarMutationRequest(BaseModel):
     make_ai: Optional[str] = None
     model_ai: Optional[str] = None
     source_url: Optional[str] = None
+    is_visible: Optional[bool] = None
     is_chase: Optional[bool] = None
     is_limited: Optional[bool] = None
     limited_pieces: Optional[int] = None

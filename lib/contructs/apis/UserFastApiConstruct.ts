@@ -20,6 +20,7 @@ interface UserFastApiConstructProps {
     dbSecret: secret.ISecret;
     layer: lambda.LayerVersion;
     profileImageBucket: s3.IBucket;
+    showroomImageBucket: s3.IBucket;
     carImageBucket: s3.IBucket;
     userMessagingTable: dynamodb.ITable;
     messagingWebSocketUrl: string;
@@ -40,6 +41,7 @@ export class UserFastApiConstruct extends Construct {
             dbSecret,
             layer,
             profileImageBucket,
+            showroomImageBucket,
             carImageBucket,
             userMessagingTable,
             messagingWebSocketUrl,
@@ -58,6 +60,7 @@ export class UserFastApiConstruct extends Construct {
                 DB_SECRET_ARN: dbSecret.secretArn,
                 DB_NAME: "carsdb",
                 PROFILE_IMAGE_BUCKET: profileImageBucket.bucketName,
+                SHOWROOM_IMAGE_BUCKET: showroomImageBucket.bucketName,
                 CAR_IMAGE_BUCKET: carImageBucket.bucketName,
                 USER_MESSAGING_TABLE: userMessagingTable.tableName,
                 MESSAGING_WS_URL: messagingWebSocketUrl,
@@ -73,6 +76,7 @@ export class UserFastApiConstruct extends Construct {
         dbSecret.grantRead(this.function);
         rds.connections.allowDefaultPortFrom(this.function);
         profileImageBucket.grantReadWrite(this.function);
+        showroomImageBucket.grantReadWrite(this.function);
         carImageBucket.grantReadWrite(this.function);
         userMessagingTable.grantReadWriteData(this.function);
         const stack = Stack.of(this);
@@ -114,6 +118,53 @@ export class UserFastApiConstruct extends Construct {
             path: "/profiles/{user_id}/{proxy+}",
             methods: [apigwv2.HttpMethod.GET],
             integration,
+        });
+
+        httpApi.addRoutes({
+            path: "/showroom",
+            methods: [apigwv2.HttpMethod.GET],
+            integration,
+        });
+
+        httpApi.addRoutes({
+            path: "/showroom",
+            methods: [apigwv2.HttpMethod.POST],
+            integration,
+            authorizer,
+        });
+
+        httpApi.addRoutes({
+            path: "/showroom/feed/{mode}",
+            methods: [apigwv2.HttpMethod.GET],
+            integration,
+            authorizer,
+        });
+
+        httpApi.addRoutes({
+            path: "/showroom/{proxy+}",
+            methods: [apigwv2.HttpMethod.GET],
+            integration,
+        });
+
+        httpApi.addRoutes({
+            path: "/showroom/{proxy+}",
+            methods: [apigwv2.HttpMethod.POST],
+            integration,
+            authorizer,
+        });
+
+        httpApi.addRoutes({
+            path: "/showroom/{proxy+}",
+            methods: [apigwv2.HttpMethod.PUT],
+            integration,
+            authorizer,
+        });
+
+        httpApi.addRoutes({
+            path: "/showroom/{proxy+}",
+            methods: [apigwv2.HttpMethod.DELETE],
+            integration,
+            authorizer,
         });
 
         httpApi.addRoutes({
