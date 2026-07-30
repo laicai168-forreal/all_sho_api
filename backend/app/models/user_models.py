@@ -5,6 +5,7 @@ from typing import Optional
 
 
 class UpdateUserRequest(BaseModel):
+    username: Optional[str] = None
     bio: Optional[str] = None
     address: Optional[str] = None
     age: Optional[int] = None

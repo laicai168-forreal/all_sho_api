@@ -14,6 +14,10 @@ def _get_cognito_username(claims):
     )
 
 
+def _get_profile_username(user, claims):
+    return user.get("username") or _get_cognito_username(claims)
+
+
 def create_user_if_not_exists(sub, email, phone, claims):
     username = _get_cognito_username(claims)
     user_repository.create_user(sub, email, phone, username)
@@ -25,7 +29,7 @@ def get_user_profile(sub, claims):
         return None
 
     # merge Cognito data
-    user["username"] = _get_cognito_username(claims)
+    user["username"] = _get_profile_username(user, claims)
     user["email"] = claims.get("email")
     user["phone_number"] = claims.get("phone_number")
     user["role"] = user.get("role") or "customer"
@@ -38,6 +42,12 @@ def update_user_profile(sub, data):
     current_user = user_repository.get_user_by_sub(sub)
     if not current_user:
         return 0
+
+    username = current_user.get("username")
+    if "username" in data:
+        requested_username = (data.get("username") or "").strip()
+        if requested_username:
+            username = requested_username
 
     profile_image_url = current_user.get("profile_image_url")
     pending_profile_image_key = data.get("pendingProfileImageKey")
@@ -62,6 +72,7 @@ def update_user_profile(sub, data):
 
     return user_repository.update_user(
         sub,
+        username,
         bio,
         address,
         age,

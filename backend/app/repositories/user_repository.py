@@ -13,7 +13,7 @@ def create_user(sub, email, phone, username):
             VALUES (%s, %s, %s, %s, %s)
             ON CONFLICT (cognito_sub) DO UPDATE
             SET id = EXCLUDED.id,
-                username = EXCLUDED.username,
+                username = COALESCE(users.username, EXCLUDED.username),
                 email = EXCLUDED.email,
                 phone_number = EXCLUDED.phone_number
         """,
@@ -34,25 +34,32 @@ def get_user_by_sub(sub):
         return dict(zip(columns, row))
 
 
-def update_user(sub, bio, address, age, profile_image_url, message_notifications_muted):
+def update_user(sub, username, bio, address, age, profile_image_url, message_notifications_muted):
     conn = get_db_connection()
-    with conn.cursor() as cur:
-        cur.execute(
-            """
-            UPDATE users
-            SET bio = %s,
-                address = %s,
-                age = %s,
-                profile_image_url = %s,
-                message_notifications_muted = %s
-            WHERE cognito_sub = %s
-        """,
-            (bio, address, age, profile_image_url, message_notifications_muted, sub),
-        )
-        updated_rows = cur.rowcount
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE users
+                SET username = %s,
+                    bio = %s,
+                    address = %s,
+                    age = %s,
+                    profile_image_url = %s,
+                    message_notifications_muted = %s
+                WHERE cognito_sub = %s
+            """,
+                (username, bio, address, age, profile_image_url, message_notifications_muted, sub),
+            )
+            updated_rows = cur.rowcount
 
-    conn.commit()
-    return updated_rows
+        conn.commit()
+        return updated_rows
+    except IntegrityError as error:
+        conn.rollback()
+        if "username" in str(error).lower():
+            raise ValueError("Display name is already taken")
+        raise
 
 
 def update_user_role_by_sub(cognito_sub, role):

@@ -47,7 +47,10 @@ def get_me(request: Request):
 def update_me(request: Request, body: UpdateUserRequest):
     sub = get_current_user_sub(request)
 
-    updated_rows = user_service.update_user_profile(sub, body.dict(exclude_unset=True))
+    try:
+        updated_rows = user_service.update_user_profile(sub, body.dict(exclude_unset=True))
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error))
 
     if not updated_rows:
         raise HTTPException(status_code=404, detail="User not found")

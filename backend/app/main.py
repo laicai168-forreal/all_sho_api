@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.routes import cars, showroom, users
+from app.routes import cars, collections, showroom, users
 
 app = FastAPI(title="Laicai API", version="1.0.0")
 
@@ -17,3 +17,4 @@ app.include_router(users.public_router, tags=["Public Profiles"])
 app.include_router(showroom.router, tags=["Showroom"])
 app.include_router(showroom.public_router, tags=["Showroom"])
 app.include_router(cars.router, tags=["Cars"])
+app.include_router(collections.router, tags=["Collections"])

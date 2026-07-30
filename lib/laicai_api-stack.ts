@@ -8,14 +8,7 @@ import { UserFastApiConstruct } from './contructs/apis/UserFastApiConstruct';
 import { UserMessagingRealtimeConstruct } from './contructs/apis/UserMessagingRealtimeConstruct';
 import { ImageResizeCfnConstruct } from './contructs/cloudFront/ImageResizeCfnConstruct';
 import { CarsDynamoConstruct } from './contructs/dynamos/CarsDynamoConstruct';
-import { LikeCollectionDynamoConstruct } from './contructs/dynamos/LikeCollectionDynamoConstruct';
-import { UserCollectionDynamoConstruct } from './contructs/dynamos/UserCollectionDynamoConstruct';
 import { UserMessagingDynamoConstruct } from './contructs/dynamos/UserMessagingDynamoConstruct';
-import { AddCollectionConstruct } from './contructs/lambdas/collections/AddCollectionConstruct';
-import { DeleteCollectionConstruct } from './contructs/lambdas/collections/DeleteCollectionConstruct';
-import { DislikeCollectionConstruct } from './contructs/lambdas/collections/DislikeCollectionConstruct';
-import { GetCollectionConstruct } from './contructs/lambdas/collections/GetCollectionConstruct';
-import { LikeCollectionConstruct } from './contructs/lambdas/collections/LikeCollectionConstruct';
 import { AddtionalCarDataPopulatorConstruct } from './contructs/lambdas/crawlers/AddtionalCarDataConstruct';
 import { CrawlerConstruct } from './contructs/lambdas/crawlers/CarCrawlerConstruct';
 import { HotWheelsCrawlerConstruct } from './contructs/lambdas/crawlers/HotWheelsCrawlerConstruct';
@@ -55,31 +48,10 @@ export class LaicaiApiStack extends cdk.Stack {
 
 		///////////////////////////////////////////////////////////////
 		// User collection stack
-		const userItemTable = new UserCollectionDynamoConstruct(this, 'UserItemTable');
-		const likeItemTable = new LikeCollectionDynamoConstruct(this, 'LikeItemTable');
 		const userMessagingTable = new UserMessagingDynamoConstruct(this, 'UserMessagingTable');
 		const messagingRealtime = new UserMessagingRealtimeConstruct(this, 'UserMessagingRealtime', {
 			userMessagingTable: userMessagingTable.table,
 		});
-		const { function: addCollectionFunction } = new AddCollectionConstruct(this, 'UCAdd', { carRDSInstance, secret: dbSecret, vpc: carsVpc });
-		const { function: getCollectionFunction } = new GetCollectionConstruct(this, 'UCGet', { carRDSInstance, secret: dbSecret, vpc: carsVpc });
-		const { function: deleteCollectionFunction } = new DeleteCollectionConstruct(this, 'UCDelete', { carRDSInstance, secret: dbSecret, vpc: carsVpc });
-		const { function: likeCollectionFunction } = new LikeCollectionConstruct(this, 'UCLike', { carRDSInstance, secret: dbSecret, vpc: carsVpc });
-		const { function: dislikeCollectionFunction } = new DislikeCollectionConstruct(this, 'UCDislike', { carRDSInstance, secret: dbSecret, vpc: carsVpc });
-		// const { api: userItemApi } = new UserCollectionApiConstruct(
-		// 	this,
-		// 	'UserCollectionApi',
-		// 	{
-		// 		addCollectionFunction,
-		// 		getCollectionFunction,
-		// 		deleteCollectionFunction,
-		// 		likeCollectionFunction,
-		// 		dislikeCollectionFunction,
-		// 		authorizer,
-		// 	});
-		// new cdk.CfnOutput(this, 'user item api', {
-		// 	value: userItemApi.url ?? 'No URL',
-		// });
 
 		// Crawler stack
 		const carsDynamo = new CarsDynamoConstruct(this, 'CrawlerDB');
@@ -102,11 +74,6 @@ export class LaicaiApiStack extends cdk.Stack {
 		///////////////////////////////////////////////////////////////
 		// Http stack
 		const httpApiConstruct = new HttpApiConstruct(this, "HttpApiConstruct", {
-			addCollectionFn: addCollectionFunction,
-			deleteCollectionFn: deleteCollectionFunction,
-			likeCollectionFn: likeCollectionFunction,
-			dislikeCollectionFn: dislikeCollectionFunction,
-			getCollectionFn: getCollectionFunction,
 			userPoolId: cognitoUserPoolId,
 			appClientId: cognitoAppClientId,
 		});

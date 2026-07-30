@@ -200,6 +200,28 @@ export class UserFastApiConstruct extends Construct {
         });
 
         httpApi.addRoutes({
+            path: "/collections",
+            methods: [
+                apigwv2.HttpMethod.GET,
+                apigwv2.HttpMethod.POST,
+                apigwv2.HttpMethod.DELETE,
+            ],
+            integration,
+            authorizer,
+        });
+
+        httpApi.addRoutes({
+            path: "/likes",
+            methods: [
+                apigwv2.HttpMethod.GET,
+                apigwv2.HttpMethod.POST,
+                apigwv2.HttpMethod.DELETE,
+            ],
+            integration,
+            authorizer,
+        });
+
+        httpApi.addRoutes({
             path: "/car-change-requests/{proxy+}",
             methods: [apigwv2.HttpMethod.GET, apigwv2.HttpMethod.POST],
             integration,

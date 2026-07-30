@@ -1,15 +1,8 @@
 import { Construct } from "constructs";
 import * as apigwv2 from "aws-cdk-lib/aws-apigatewayv2";
 import { JwtAuthorizer } from "./JwtAuthorizer";
-import { CollectionRoutes } from "./CollectionRoutes";
-import { Function as LambdaFunction } from "aws-cdk-lib/aws-lambda";
 
 interface HttpApiConstructProps {
-    addCollectionFn: LambdaFunction;
-    deleteCollectionFn: LambdaFunction;
-    likeCollectionFn: LambdaFunction;
-    dislikeCollectionFn: LambdaFunction;
-    getCollectionFn: LambdaFunction;
     userPoolId: string;
     appClientId: string;
 }
@@ -22,11 +15,6 @@ export class HttpApiConstruct extends Construct {
         super(scope, id);
 
         const {
-            addCollectionFn,
-            deleteCollectionFn,
-            likeCollectionFn,
-            dislikeCollectionFn,
-            getCollectionFn,
             userPoolId,
             appClientId,
         } = props;
@@ -52,16 +40,5 @@ export class HttpApiConstruct extends Construct {
         });
 
         this.authorizer = authorizer.authorizer;
-
-        // Collection routes
-        new CollectionRoutes(this, "CollectionRoutes", {
-            httpApi: this.httpApi,
-            authorizer: authorizer.authorizer,
-            addCollectionFn,
-            deleteCollectionFn,
-            likeCollectionFn,
-            dislikeCollectionFn,
-            getCollectionFn,
-        });
     }
 }

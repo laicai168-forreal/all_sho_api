@@ -1,1 +1,1 @@
-from . import car_repository, user_repository
+from . import car_repository, collection_repository, user_repository
